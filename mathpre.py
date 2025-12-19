@@ -19,7 +19,6 @@ import json
 # 屏蔽 transformers 的冗余警告
 import transformers
 transformers.logging.set_verbosity_error()
-
 # ==========================================
 # 🛠️ 核心配置区域 (已修改为 GSM8K)
 # ==========================================
@@ -204,6 +203,53 @@ class GeminiGenerator:
                 time.sleep(5)
                 responses.append("Error")
         return responses
+
+
+from typing import List
+from openai import OpenAI  # pip install openai>=1.0
+class SGLangGenerator:
+    """一个最小实现的生成器，适配 FlashRAG 的 generator.generate(prompts) 接口。"""
+
+    def __init__(
+        self,
+        base_url: str,
+        model_name: str,
+        max_new_tokens: int = 1024,
+        batch_size: int = 8,
+        temperature: float = 0.0,
+    ):
+        # SGLang 的 OpenAI 兼容客户端
+        self.client = OpenAI(
+            api_key=os.getenv("SGLANG_API_KEY", "EMPTY"),  # SGLang 不校验也没关系
+            base_url=base_url.rstrip("/"),
+        )
+        self.model = model_name
+        self.max_new_tokens = max_new_tokens
+        self.batch_size = batch_size
+        self.temperature = temperature
+
+        # 让 FlashRAG / 你自己的代码看着舒服一点的属性
+        self.max_input_len = 4096
+
+    def generate(self, prompts: List[str]) -> List[str]:
+        """prompts: List[str]，返回 List[str]。兼容你现在的 baseline 用法。"""
+        outputs: List[str] = []
+
+        for i in range(0, len(prompts), self.batch_size):
+            batch = prompts[i : i + self.batch_size]
+
+            for p in batch:
+                # 这里用 ChatCompletion，prompt 整体作为 user 内容
+                resp = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": p}],
+                    temperature=self.temperature,
+                    max_tokens=self.max_new_tokens,
+                )
+                outputs.append(resp.choices[0].message.content)
+
+        return outputs
+
 
 # ==========================================
 # 4. 评估工具 (专为 Mathlighteval 改造)
@@ -507,7 +553,33 @@ def main():
         }
         config = Config(config_dict=gemini_config_dict)
         generator = GeminiGenerator(GEMINI_MODEL_NAME, GEMINI_API_KEY)
-        
+
+    elif MODEL_SOURCE == "sglang":
+        # 你可以用环境变量控制 SGLang server 的地址和模型名
+        sglang_base_url = os.getenv("SGLANG_BASE_URL", "http://127.0.0.1:30000/v1")
+        sglang_model_name = os.getenv("SGLANG_MODEL_NAME", "Qwen/Qwen3-4B-Instruct-2507")
+
+        # config 主要是给 Retriever / Dataset / Pipeline 用的
+        sglang_config_dict = {
+            "device": "cpu",                  # 这里只做调度和评测逻辑，真正推理在 SGLang 里跑
+            "gpu_num": 0,
+            "generator_model": "openai",      # 标个名而已，不太影响
+            "generation_method": "openai",    # 同上
+            "batch_size": 8,
+            "max_input_len": 4096,
+            "max_new_tokens": 512,
+            "save_dir": "rag_result_cache",
+        }
+        config = Config(config_dict=sglang_config_dict)
+
+        generator = SGLangGenerator(
+            base_url=sglang_base_url,
+            model_name=sglang_model_name,
+            max_new_tokens=sglang_config_dict["max_new_tokens"],
+            batch_size=sglang_config_dict["batch_size"],
+            temperature=0.7,
+        )
+
     elif MODEL_SOURCE == "huggingface":
         print(f"📥 [Init] 检查/下载 HF 模型: {HF_MODEL_NAME}...")
         try:

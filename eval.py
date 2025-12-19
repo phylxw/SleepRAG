@@ -30,7 +30,7 @@ EXPERIMENT_MODE = "rag"
 
 # 2. 记忆库文件配置 (核心修改)
 # 指定外部优化过的记忆库文件
-MEMORY_SOURCE_FILE = "MATH-lighteval_optimized_memory_k50.jsonl"
+MEMORY_SOURCE_FILE = "AMATH-lighteval_optimized_memory_k50.jsonl"
 
 # 3. 结果可视化开关
 VISUALIZE_MEMORY_DISTRIBUTION = True
@@ -93,39 +93,27 @@ def prepare_data():
 
     # --- A. 适配记忆库 (读取 MATH_optimized_memory_k30.jsonl) ---
     # 如果不存在转换后的 corpus 文件，则进行转换
-    if not os.path.exists(corpus_file):
-        print(f"🔨 [Memory] 正在加载外部记忆库: {MEMORY_SOURCE_FILE} 并转换为标准格式...")
-        
-        if not os.path.exists(MEMORY_SOURCE_FILE):
-            print(f"❌ 严重错误: 未找到记忆库文件 {MEMORY_SOURCE_FILE}！")
-            print("请确保该文件在当前目录下。")
-            return False
+    with open(MEMORY_SOURCE_FILE, "r", encoding="utf-8") as fin, open(corpus_file, "w", encoding="utf-8") as fout:       
+        count = 0
+        for line in tqdm(fin, desc="Converting Memory"):
+            try:
+                item = json.loads(line)
+                # 这里的 item 结构: {"id": "2", "question": "...\nAnswer:...", "cluster_id": ...}
+                # FlashRAG 需要 "contents" 字段用于检索
+                # 直接使用 question 字段（因为它包含了问题和答案）
+                new_item = {
+                    "id": str(item.get("id")),
+                    "contents": item.get("question", ""),
+                    # 保留其他元数据以备不时之需（可选）
+                    "cluster_id": item.get("cluster_id"),
+                    "cluster_label": item.get("cluster_label") 
+                }
+                fout.write(json.dumps(new_item) + "\n")
+                count += 1
+            except json.JSONDecodeError:
+                continue
+        print(f"✅ 记忆库转换完成，共处理 {count} 条记忆。")
 
-        with open(MEMORY_SOURCE_FILE, "r", encoding="utf-8") as fin, \
-             open(corpus_file, "w", encoding="utf-8") as fout:
-            
-            count = 0
-            for line in tqdm(fin, desc="Converting Memory"):
-                try:
-                    item = json.loads(line)
-                    # 这里的 item 结构: {"id": "2", "question": "...\nAnswer:...", "cluster_id": ...}
-                    # FlashRAG 需要 "contents" 字段用于检索
-                    # 直接使用 question 字段（因为它包含了问题和答案）
-                    new_item = {
-                        "id": str(item.get("id")),
-                        "contents": item.get("question", ""),
-                        # 保留其他元数据以备不时之需（可选）
-                        "cluster_id": item.get("cluster_id"),
-                        "cluster_label": item.get("cluster_label") 
-                    }
-                    fout.write(json.dumps(new_item) + "\n")
-                    count += 1
-                except json.JSONDecodeError:
-                    continue
-            print(f"✅ 记忆库转换完成，共处理 {count} 条记忆。")
-    else:
-        print(f"✅ [Memory] 检测到已转换的记忆库: {corpus_file}，使用现有文件。")
-    
     # --- B. 准备测试集 (保持不变) ---
     print(f"🔨 [Test] 正在提取测试集 (样本数: {DEBUG_NUM if DEBUG_NUM else 'ALL'})...")
     with open(test_file, "w", encoding="utf-8") as f:

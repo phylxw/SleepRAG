@@ -20,10 +20,10 @@ GEMINI_MODEL_NAME = "gemini-2.5-flash"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # 2. 文件路径（你可以根据数据集改名；这里先以 MATH 为例）
-CLUSTERED_FILE = "MATH-lighteval_auto_clustered_result.jsonl"           # 聚类后的记忆文件
-CLUSTER_SUMMARY_FILE = "MATH-lighteval_cluster_summary.jsonl"           # 每个类有哪些记忆ID
-MEM_FREQ_FILE = "MATH-lighteval_memory_freq_20251218_031755.jsonl"  # 调用频次文件
-OUTPUT_OPTIMIZED_FILE = "MATH-lighteval_optimized_memory_k50.jsonl"   # 输出的新记忆库
+CLUSTERED_FILE = "AMATH-lighteval_auto_clustered_result.jsonl"           # 聚类后的记忆文件
+CLUSTER_SUMMARY_FILE = "AMATH-lighteval_cluster_summary.jsonl"           # 每个类有哪些记忆ID
+MEM_FREQ_FILE = "MATH-lighteval_memory_freq_20251218_150403.jsonl"  # 调用频次文件
+OUTPUT_OPTIMIZED_FILE = "AMATH-lighteval_optimized_memory_k50.jsonl"   # 输出的新记忆库
 
 # 3. 优化逻辑参数
 TOP_K_HIGH = 50                # 作为“高频记忆 anchor”的条目数量（按频次排序）

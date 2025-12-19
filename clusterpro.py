@@ -8,14 +8,17 @@ import google.generativeai as genai
 import matplotlib.pyplot as plt 
 from typing import List, Dict
 from sentence_transformers import SentenceTransformer
-from sklearn.cluster import AgglomerativeClustering 
+from sklearn.cluster import AgglomerativeClustering, KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.manifold import TSNE 
+from sklearn.decomposition import PCA # 🔥 重新加回 PCA
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import umap
+
 
 # ================= 配置区域 =================
 
 # 1. 核心开关: 选择起名字的模型来源
-# 选项: 'huggingface' (本地显卡跑) 或 'gemini' (谷歌API)
 MODEL_SOURCE = "huggingface" 
 
 # [HuggingFace 配置]
@@ -26,27 +29,50 @@ GEMINI_MODEL_NAME = "gemini-2.5-flash"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # 2. 文件配置
-INPUT_FILE = "MATH-lighteval_memory_freq_20251218_150403.jsonl" #其他的直接gsm8k改math就行了
-# INPUT_FILE = "gsm8k_corpus.jsonl"
-# 输出文件 1: 详细结果 (每行一道题，包含其类别)
+INPUT_FILE = "MATH-lighteval_memory_freq_20251218_150403.jsonl" 
 OUTPUT_FILE = "AMATH-lighteval_auto_clustered_result.jsonl"
-# 输出文件 2: 聚类摘要 (每行一个类，包含该类下所有题号) -> 🔥 新增
 SUMMARY_OUTPUT_FILE = "AMATH-lighteval_cluster_summary.jsonl"
-# 输出文件 3: 统计图表
 PLOT_FILE = "AMATH-lighteval_cluster_distribution.png"
+# 可视化图片输出路径
+VIS_PLOT_FILE = "AMATH-lighteval_visualization.png"
 
-# 3. 聚类参数
-DISTANCE_THRESHOLD = 1.0  # 距离阈值
+# 3. 聚类算法设置 (决定怎么“分”类)
+# 选项: 'agglomerative' (自动发现类别数) 或 'kmeans' (指定类别数)
+CLUSTERING_METHOD = "agglomerative" 
+
+# [Agglomerative 参数]
+DISTANCE_THRESHOLD = 1.0  
+
+# [K-Means 参数]
+KMEANS_N_CLUSTERS = 10    
+
+# 4. 可视化降维算法设置 (决定怎么“画”图)
+# 选项: 'tsne' (最常用，效果好), 'pca' (最快，线性), 'umap' (平衡，需安装umap-learn)
+VISUALIZATION_METHOD = "tsne"
+
+# 5. 数据预处理与高级参数 (🔥 新增：解决聚类“糊成一团”的优化项)
+# -------------------------------------------------------------
+# 是否在聚类和画图前，先对 Embedding 进行 PCA 降维去噪？
+# 推荐: True。通常 Sentence Embedding 维度很高(1024维)，直接聚类效果不好。
+# 降维到 50 维左右通常能去除噪音，显著改善 t-SNE 的分离效果。
+ENABLE_PCA_PREPROCESS = True
+PCA_PREPROCESS_DIMS = 50 
+
+# t-SNE 困惑度 (Perplexity): 
+# 控制 t-SNE 关注局部还是全局。数据点多时(>1000)建议调大 (30-50)，少时调小 (5-20)。
+# 调整这个参数往往能把"糊成一团"的数据拉开。
+TSNE_PERPLEXITY = 40
+# -------------------------------------------------------------
+
+# [Embedding 模型]
 EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5" 
 # ===========================================
 
-# 全局变量用于存储本地模型，防止重复加载
 GLOBAL_MODEL = None
 GLOBAL_TOKENIZER = None
 
 # =============== 0. 工具函数 ===============
 def clean_special_chars(text: str) -> str:
-    """清洗异常字符"""
     if not isinstance(text, str): return text
     return text.replace('\u2028', ' ').replace('\u2029', ' ')
 
@@ -63,7 +89,6 @@ def import_torch_and_check_gpu():
 # =============== 1. LLM 初始化与调用 ===============
 
 def init_llm():
-    """初始化 LLM (仅针对本地模型)"""
     global GLOBAL_MODEL, GLOBAL_TOKENIZER
     
     if MODEL_SOURCE == "gemini":
@@ -89,9 +114,6 @@ def init_llm():
             print("💡 提示: 请确保已通过 `huggingface-cli login` 登录或检查网络")
 
 def call_llm(prompt: str) -> str:
-    """统一 LLM 调用接口"""
-    
-    # --- 分支 A: Gemini ---
     if MODEL_SOURCE == "gemini":
         if not GEMINI_API_KEY: return "Skipped (No Key)"
         model = genai.GenerativeModel(GEMINI_MODEL_NAME) 
@@ -105,45 +127,30 @@ def call_llm(prompt: str) -> str:
             time.sleep(1)
             return "Unknown Topic"
 
-    # --- 分支 B: HuggingFace (本地) ---
     elif MODEL_SOURCE == "huggingface":
         if GLOBAL_MODEL is None:
             return "Skipped (Model Not Loaded)"
-        
         try:
             print("  🚀 [Local] 正在推理...", end="", flush=True)
-            
             messages = [
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": prompt}
             ]
-            text = GLOBAL_TOKENIZER.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-            
+            text = GLOBAL_TOKENIZER.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             model_inputs = GLOBAL_TOKENIZER([text], return_tensors="pt").to(GLOBAL_MODEL.device)
 
             with torch.no_grad():
-                generated_ids = GLOBAL_MODEL.generate(
-                    model_inputs.input_ids,
-                    max_new_tokens=50, 
-                    do_sample=False    
-                )
+                generated_ids = GLOBAL_MODEL.generate(model_inputs.input_ids, max_new_tokens=50, do_sample=False)
             
             generated_ids = [
                 output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
             ]
             response = GLOBAL_TOKENIZER.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            
             print(" 完成!")
             return clean_special_chars(response.strip())
-            
         except Exception as e:
             print(f"\n❌ [Local Error]: {e}")
             return "Unknown Topic"
-            
     return "Unknown Config"
 
 # =============== 2. 基础 IO ===============
@@ -167,7 +174,7 @@ def load_questions(jsonl_path: str):
             else:
                 q_part = content
             
-            ids.append(str(obj["id"]))
+            ids.append(str(obj["memory_id"]))
             questions.append(clean_special_chars(q_part))
             
     print(f"✅ 加载完成，共 {len(questions)} 条数据")
@@ -184,22 +191,48 @@ def build_embeddings(questions: List[str], model_name: str) -> np.ndarray:
     emb = model.encode(q_norm, batch_size=32, show_progress_bar=True, normalize_embeddings=True)
     return np.asarray(emb)
 
-def cluster_questions_auto(embeddings: np.ndarray, threshold: float) -> np.ndarray:
-    print(f"🤖 正在执行自动聚类 (Distance Threshold={threshold})...")
+def preprocess_embeddings_pca(embeddings: np.ndarray, n_components: int) -> np.ndarray:
+    """
+    🔥 新增预处理函数: 使用 PCA 降维去噪
+    """
+    print(f"🧹 正在执行 PCA 预处理 (降维: {embeddings.shape[1]} -> {n_components})...")
+    if embeddings.shape[0] < n_components:
+        print(f"⚠️ 样本数 ({embeddings.shape[0]}) 少于目标维度 ({n_components})，跳过 PCA 预处理。")
+        return embeddings
     
-    model = AgglomerativeClustering(
-        n_clusters=None, 
-        distance_threshold=threshold,
-        metric='euclidean', 
-        linkage='ward'
-    )
-    labels = model.fit_predict(embeddings)
+    pca = PCA(n_components=n_components)
+    reduced = pca.fit_transform(embeddings)
     
-    n_clusters_found = len(set(labels))
-    print(f"✨ 自动聚类完成！模型自动发现了 {n_clusters_found} 个题型类别。")
-    return labels
+    # 打印保留的方差比例，让用户知道损失了多少信息
+    explained_variance = np.sum(pca.explained_variance_ratio_)
+    print(f"   >>> 保留方差比例: {explained_variance:.2%}")
+    return reduced
 
-# =============== 4. 统计绘图 & 关键词 ===============
+def cluster_questions_auto(embeddings: np.ndarray) -> np.ndarray:
+    if CLUSTERING_METHOD == "kmeans":
+        print(f"🤖 正在执行 K-Means 聚类 (N_Clusters={KMEANS_N_CLUSTERS})...")
+        model = KMeans(n_clusters=KMEANS_N_CLUSTERS, random_state=42, n_init='auto')
+        labels = model.fit_predict(embeddings)
+        print(f"✨ K-Means 聚类完成！共生成 {KMEANS_N_CLUSTERS} 个类别。")
+        return labels
+        
+    elif CLUSTERING_METHOD == "agglomerative":
+        print(f"🤖 正在执行层次聚类 Agglomerative (Distance Threshold={DISTANCE_THRESHOLD})...")
+        model = AgglomerativeClustering(
+            n_clusters=None, 
+            distance_threshold=DISTANCE_THRESHOLD,
+            metric='euclidean', 
+            linkage='ward'
+        )
+        labels = model.fit_predict(embeddings)
+        n_clusters_found = len(set(labels))
+        print(f"✨ 层次聚类完成！模型自动发现了 {n_clusters_found} 个题型类别。")
+        return labels
+    
+    else:
+        raise ValueError(f"未知的聚类方法: {CLUSTERING_METHOD}")
+
+# =============== 4. 统计绘图 & 关键词 & 降维可视化 ===============
 
 def plot_cluster_stats(labels: np.ndarray, save_path: str):
     print(f"\n📊 正在生成统计图表...")
@@ -213,7 +246,7 @@ def plot_cluster_stats(labels: np.ndarray, save_path: str):
     valid_counts = counts[valid_mask]
     
     print(f"   - 总聚类数: {len(unique_labels)}")
-    print(f"   - 孤立聚类数 (Size=1): {num_singletons} (这部分不画在图里)")
+    print(f"   - 孤立聚类数 (Size=1): {num_singletons}")
     print(f"   - 有效聚类数 (Size>1): {len(valid_labels)}")
     
     if len(valid_counts) == 0:
@@ -229,13 +262,80 @@ def plot_cluster_stats(labels: np.ndarray, save_path: str):
     plt.bar(x_ticks, sorted_plot_counts, color='steelblue', edgecolor='black', alpha=0.8)
     plt.xlabel('Cluster ID', fontsize=12)
     plt.ylabel('Number of Questions', fontsize=12)
-    plt.title(f'Cluster Size Distribution (Descending)\n(Excluding {num_singletons} singleton clusters)', fontsize=14)
+    plt.title(f'Cluster Size Distribution (Descending)\nMethod: {CLUSTERING_METHOD}', fontsize=14)
     if len(x_ticks) > 30: plt.xticks(rotation=90, fontsize=8)
     else: plt.xticks(rotation=0)
     plt.grid(axis='y', linestyle='--', alpha=0.5)
     plt.tight_layout()
     plt.savefig(save_path)
     print(f"🖼️ 图表已保存至: {save_path}")
+
+def plot_dimensionality_reduction(embeddings: np.ndarray, labels: np.ndarray, method: str, save_path: str):
+    """
+    🔥 统一的降维可视化函数，支持 t-SNE, PCA, UMAP
+    """
+    print(f"\n🎨 正在生成 {method.upper()} 聚类分布图...")
+    if embeddings.shape[0] < 2:
+        print("⚠️ 数据点太少，跳过可视化。")
+        return
+
+    reducer = None
+    
+    # --- 1. 选择算法 ---
+    if method == "tsne":
+        n_samples = embeddings.shape[0]
+        # 允许用户通过全局参数 TSNE_PERPLEXITY 调整
+        perplexity_val = min(TSNE_PERPLEXITY, n_samples - 1) if n_samples > 1 else 1
+        print(f"   >>> 运行 t-SNE (perplexity={perplexity_val})...")
+        
+        reducer = TSNE(
+            n_components=2, 
+            perplexity=perplexity_val, 
+            random_state=42, 
+            init='pca', 
+            learning_rate='auto'
+        )
+        
+    elif method == "pca":
+        print(f"   >>> 运行 PCA (Linear)...")
+        reducer = PCA(n_components=2)
+        
+    elif method == "umap":
+        if umap is None:
+            print("❌ 未检测到 UMAP 库。请运行 `pip install umap-learn` 安装。")
+            print("   (将自动回退到 t-SNE)")
+            return plot_dimensionality_reduction(embeddings, labels, "tsne", save_path)
+        print(f"   >>> 运行 UMAP...")
+        reducer = umap.UMAP(n_components=2, random_state=42)
+        
+    else:
+        print(f"❌ 未知的可视化方法: {method}")
+        return
+
+    # --- 2. 降维 ---
+    reduced_emb = reducer.fit_transform(embeddings)
+
+    # --- 3. 绘图 ---
+    plt.figure(figsize=(12, 10))
+    scatter = plt.scatter(
+        reduced_emb[:, 0], 
+        reduced_emb[:, 1], 
+        c=labels, 
+        cmap='nipy_spectral', 
+        s=15, 
+        alpha=0.6,
+        edgecolor='none'
+    )
+    
+    plt.colorbar(scatter, label='Cluster ID')
+    plt.title(f'{method.upper()} Visualization\n(Cluster: {CLUSTERING_METHOD}, Preprocess: {ENABLE_PCA_PREPROCESS})', fontsize=15)
+    plt.xlabel(f'{method.upper()} Dimension 1')
+    plt.ylabel(f'{method.upper()} Dimension 2')
+    plt.grid(True, linestyle='--', alpha=0.3)
+    plt.tight_layout()
+    
+    plt.savefig(save_path, dpi=300)
+    print(f"🖼️ 可视化图表已保存至: {save_path}")
 
 def tfidf_keywords_per_cluster(questions, cluster_labels, max_features=5000, top_k=10):
     print("🔍 提取关键词...")
@@ -273,30 +373,33 @@ Output ONLY the category name.
 
 # =============== Main ===============
 def cluster():
-    # 0. 初始化
     init_llm()
 
-    # 1. 加载数据
     ids, questions = load_questions(INPUT_FILE)
     if not ids: return
 
-    # 2. Embedding
     embeddings = build_embeddings(questions, model_name=EMBEDDING_MODEL)
     
-    # 3. 自动聚类
-    labels = cluster_questions_auto(embeddings, threshold=DISTANCE_THRESHOLD)
+    # 🔥 1. 预处理 (新增步骤：降维去噪)
+    if ENABLE_PCA_PREPROCESS:
+        embeddings = preprocess_embeddings_pca(embeddings, n_components=PCA_PREPROCESS_DIMS)
 
-    # 4. 画图
+    # 2. 聚类
+    labels = cluster_questions_auto(embeddings)
+
+    # 3. 画图
     plot_cluster_stats(labels, save_path=PLOT_FILE)
+    
+    # 4. 可视化 (t-SNE/PCA/UMAP)
+    plot_dimensionality_reduction(embeddings, labels, method=VISUALIZATION_METHOD, save_path=VIS_PLOT_FILE)
 
-    # 5. 分析关键词
+    # 5. 分析关键词与保存
     keywords_map = tfidf_keywords_per_cluster(questions, labels)
     
     print("\n" + "="*20 + " 聚类结果分析 " + "="*20)
     cluster_labels_text = {}
     
     unique, counts = np.unique(labels, return_counts=True)
-    # 按数量降序排序
     sorted_clusters = sorted(zip(unique, counts), key=lambda x: x[1], reverse=True)
     
     print(f"📊 总共发现 {len(sorted_clusters)} 个聚类。")
@@ -310,7 +413,6 @@ def cluster():
         print(f"   >>> 关键词: {keywords_map.get(cid, [])}")
         if MODEL_SOURCE == "gemini": time.sleep(2)
 
-    # 6. 保存详细结果 (原功能)
     print(f"\n💾 保存详细结果到 {OUTPUT_FILE}...")
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         for qid, q, cid in zip(ids, questions, labels):
@@ -323,10 +425,7 @@ def cluster():
             }
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
             
-    # 7. 🔥 新增：保存聚类摘要索引表
     print(f"💾 保存聚类摘要到 {SUMMARY_OUTPUT_FILE}...")
-    
-    # 构造聚合数据 {cluster_id: {label, ids}}
     cluster_aggregation = {}
     for qid, cid in zip(ids, labels):
         cid_int = int(cid)
@@ -338,9 +437,7 @@ def cluster():
             }
         cluster_aggregation[cid_int]["memory_ids"].append(qid)
     
-    # 写入文件
     with open(SUMMARY_OUTPUT_FILE, "w", encoding="utf-8") as f:
-        # 按 cluster_id 排序写入，方便查看
         for cid in sorted(cluster_aggregation.keys()):
             f.write(json.dumps(cluster_aggregation[cid], ensure_ascii=False) + "\n")
             
