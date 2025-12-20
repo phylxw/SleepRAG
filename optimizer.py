@@ -386,7 +386,7 @@ def select_high_low_ids(
     low_ids = []
     zero_ids = []
     for mid, f in sorted_asc:
-        if f == 0:
+        if f < 0:
             zero_ids.append(mid)
             continue
         if f == low_freq_for_low_only:
@@ -395,7 +395,7 @@ def select_high_low_ids(
             break
 
     print(f"🔥 高频 anchor 数量: {len(high_ids)}")
-    print(f"🧊 0 次调用的记忆数量: {len(zero_ids)}（之后会删除）")
+    print(f"🧊 分数小于-2的记忆数量: {len(zero_ids)}（之后会删除）")
     print(f"🥶 低频扩写候选(freq={low_freq_for_low_only})数量: {len(low_ids)} (最多 bottom_k={bottom_k_low})")
     return set(high_ids), set(low_ids), set(zero_ids)
 
@@ -441,6 +441,7 @@ def optimize_memory(cfg: DictConfig):
     to_delete_ids = set()            
 
     print("\n========== 高频记忆聚合阶段 (Batch Optimized) ==========")
+    to_delete_ids.update(zero_ids)
     high_ids_sorted = sorted(list(high_ids), key=lambda x: -freq_map.get(x, 0))
     top_n_similar = cfg.optimizer.top_n_similar
     
@@ -543,7 +544,6 @@ def optimize_memory(cfg: DictConfig):
 
     # 5. 低频：扩写
     print("\n========== 低频记忆扩写阶段 ==========")
-    # to_delete_ids.update(zero_ids)
 
     low_expand_ids = [
         mid for mid in low_ids

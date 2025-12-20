@@ -59,7 +59,8 @@ experiment:
   mode: "rag" # "baseline", "rag", "all"
   dataset_name: "DigitalLearningGmbH/MATH-lighteval"
   dataset_config: "algebra"
-  debug_num: 20 # 设置为 null 跑全量，数字用于调试
+  start_index: 500
+  debug_num: 200 # 设置为 null 跑全量，数字用于调试
   visualize_memory: True
   #字段映射配置
   field_map:

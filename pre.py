@@ -191,7 +191,11 @@ def evaluate_results(results, experiment_name, result_log_file):
 # ==========================================
 
 def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
-    """准备数据：下载、切分、生成 corpus.jsonl 和 test.jsonl"""
+    """
+    准备数据：
+    1. 生成 corpus.jsonl (记忆库)
+    2. 生成 test.jsonl (测试集，在此处应用 start_index 和 debug_num)
+    """
     dataset_name = cfg.experiment.dataset_name
     dataset_config = cfg.experiment.dataset_config
     
@@ -222,15 +226,13 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
             for i, item in enumerate(tqdm(dataset[split_train])):
                 q_text = item.get(q_col, "")
                 a_text = item.get(a_col, "")
-                # 构建检索内容
                 content = f"Question: {q_text}\nAnswer: {a_text}"
                 f.write(json.dumps({"id": str(i), "contents": content}) + "\n")
     else:
         print(f"✅ [Memory] 检测到现有记忆库: {corpus_file}，跳过构建。")
     
     # --- B. 准备测试集 (Test) ---
-    debug_num = cfg.experiment.debug_num
-    print(f"🔨 [Test] 正在提取测试集 (样本数: {debug_num if debug_num else 'ALL'})...")
+    print(f"🔨 [Test] 正在处理测试集...")
     
     with open(test_file, "w", encoding="utf-8") as f:
         if split_test not in dataset:
@@ -238,19 +240,52 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
              return False
              
         test_data = dataset[split_test]
+        
+        # 1. 获取配置参数
+        # start_index: 从第几题开始 (默认 0)
+        start_idx = int(cfg.experiment.get("start_index", 0) or 0)
+        # debug_num: 限制测试多少题 (默认 None，即跑完剩余所有)
+        debug_num = cfg.experiment.get("debug_num")
+        
+        total_len = len(test_data)
+        
+        # 2. 计算切片范围
+        # 如果设置了 debug_num，结束位置就是 start + debug_num
+        # 否则结束位置就是总长度
         if debug_num:
-            limit = min(int(debug_num), len(test_data))
-            test_data = test_data.select(range(limit))
+            limit = int(debug_num)
+            end_idx = min(start_idx + limit, total_len)
+            print(f"🐛 [Config] 限制范围: 第 {start_idx} 题 -> 第 {end_idx} 题 (共 {end_idx - start_idx} 题)")
+        else:
+            end_idx = total_len
+            print(f"⏩ [Config] 从第 {start_idx} 题开始跑完所有剩余题目 (共 {end_idx - start_idx} 题)")
+
+        # 3. 执行切片 (使用 HuggingFace 的 select 方法)
+        if start_idx >= total_len:
+            print("⚠️ Warning: start_index 超过了数据总量，测试集将为空！")
+            test_data = test_data.select([]) # 空集
+        else:
+            # 创建索引列表
+            indices = range(start_idx, end_idx)
+            test_data = test_data.select(indices)
+
+        print(f"📊 最终写入测试集数量: {len(test_data)}")
             
+        # 4. 写入文件
         for i, item in enumerate(test_data):
             q_text = item.get(q_col, "")
             raw_ans = item.get(a_col, "")
             
+            # 🔥 关键点：修正 ID
+            # 这里的 i 是从 0 开始的，但为了方便回溯，我们将 ID 设置为 "原始偏移量 + i"
+            # 例如从第 100 题开始跑，第一条数据的 ID 就是 100
+            real_id = start_idx + i
+            
             f.write(json.dumps({
-                "id": str(i),
+                "id": str(real_id),
                 "question": q_text,
                 "golden_answers": [str(raw_ans)]
-            }) + "\n")
+            }) + "\n")            
     return True
 
 def build_index(corpus_file: str, index_dir: str):
@@ -281,12 +316,65 @@ def build_index(corpus_file: str, index_dir: str):
     print("✅ 索引构建完成！")
 
 def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_image_file: str):
-    """记忆热度统计与导出"""
+    """
+    记忆热度/效用统计与导出 (强化学习版)
+    逻辑：
+    - 检索命中 & 题目做对: freq += 2 (奖励)
+    - 检索命中 & 题目做错: freq -= 2 (惩罚)
+    """
     # 这里的 freq_file 从 config 中读取
     freq_file = cfg.paths.freq_file
     
-    print("\n🔍 [Analysis] 正在进行全量记忆热度统计...")
+    print("\n🔍 [Analysis] 正在进行全量记忆效用评分 (RL Scoring)...")
     
+    # ================= 判题辅助函数 (内嵌，确保独立运行) =================
+    def _local_extract(text):
+        if not text: return None
+        text = str(text).strip()
+        idx = text.rfind("\\boxed{")
+        if idx != -1:
+            content_start = idx + 7 
+            balance = 0
+            for i in range(content_start, len(text)):
+                if text[i] == '{': balance += 1
+                elif text[i] == '}':
+                    if balance == 0: return text[content_start:i] 
+                    balance -= 1
+        lines = text.strip().split('\n')
+        if lines:
+            last_line = lines[-1].strip()
+            if last_line.endswith('.'): last_line = last_line[:-1]
+            last_line = last_line.replace('$', '').replace('`', '')
+            last_line = re.sub(r'^(The )?Answer( is)?:?', '', last_line, flags=re.IGNORECASE).strip()
+            if '=' in last_line: last_line = last_line.split('=')[-1].strip()
+            if '\\approx' in last_line: last_line = last_line.split('\\approx')[-1].strip()
+            if len(last_line) < 100: return last_line
+        return None
+
+    def _local_norm(s):
+        if not s: return ""
+        s = str(s).replace('$', '').replace('`', '').replace('\\%', '%')
+        s = s.replace("\\dfrac", "\\frac").replace("\\text", "")
+        s = s.replace("\\left", "").replace("\\right", "").replace("\\mathrm", "")
+        s = "".join(s.split())
+        if '=' in s: s = s.split('=')[-1]
+        if '\\in' in s: s = s.split('\\in')[-1]
+        return s.rstrip('.').strip()
+
+    def _check_correct(item):
+        """判断单条结果是否正确"""
+        pred = item.pred if hasattr(item, 'pred') else item.get('pred')
+        gold = item.golden_answers[0] if hasattr(item, 'golden_answers') else item.get('golden_answers')[0]
+        
+        gold_val = _local_extract(gold) or str(gold).strip()
+        pred_val = _local_extract(pred)
+        
+        if gold_val and pred_val:
+            if _local_norm(gold_val) == _local_norm(pred_val):
+                return True
+        return False
+    # ===============================================================
+
     all_memory_ids = set()
     id_to_content = {} 
 
@@ -300,75 +388,107 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
     except Exception as e:
         print(f"⚠️ 无法读取记忆库文件 {corpus_file}，错误: {e}")
     
-    memory_counter = collections.Counter({mid: 0 for mid in all_memory_ids})
+    # 初始化分数，默认 0
+    # 注意：这里我们用 score 代替原来的单纯计数，但变量名在输出时依然叫 freq 以兼容后续脚本
+    memory_scores = {mid: 0 for mid in all_memory_ids}
     
-    # 统计命中
-    for item in rag_results:
+    # 统计命中并打分
+    total_questions = len(rag_results)
+    correct_count = 0
+
+    for item in tqdm(rag_results, desc="Scoring Memories"):
+        # 1. 判定当前题目是否做对
+        is_correct = _check_correct(item)
+        if is_correct: correct_count += 1
+        
+        # 2. 决定 奖励/惩罚 分数
+        reward = 2 if is_correct else -2
+        
+        # 3. 找到检索到的记忆，进行加减分
         retrieved_docs = getattr(item, 'retrieval_result', [])
         for doc in retrieved_docs:
             if isinstance(doc, dict):
                 doc_id = str(doc.get('id'))
             else:
                 doc_id = str(getattr(doc, 'id', None))
-            if doc_id:
-                memory_counter[doc_id] += 1
+            
+            if doc_id and doc_id in memory_scores:
+                memory_scores[doc_id] += reward
 
-    # 排序
-    sorted_memories = sorted(memory_counter.items(), key=lambda x: (-x[1], x[0]))
+    # 排序 (按分数从高到低)
+    sorted_memories = sorted(memory_scores.items(), key=lambda x: (-x[1], x[0]))
     
-    total = len(sorted_memories)
-    used = sum(1 for _, v in sorted_memories if v > 0)
-    print(f"📊 记忆库总量: {total} | 激活: {used} | 未激活: {total - used}")
+    # 统计信息
+    total_mem = len(sorted_memories)
+    positive_mem = sum(1 for _, v in sorted_memories if v > 0)
+    negative_mem = sum(1 for _, v in sorted_memories if v < 0)
+    zero_mem = sum(1 for _, v in sorted_memories if v == 0)
+    
+    print(f"📊 记忆库评分统计:")
+    print(f"   - 总量: {total_mem}")
+    print(f"   - 正分(贡献者): {positive_mem} ({(positive_mem/total_mem)*100:.1f}%)")
+    print(f"   - 负分(干扰项): {negative_mem} ({(negative_mem/total_mem)*100:.1f}%)")
+    print(f"   - 零分(冷门): {zero_mem}")
+    print(f"   - 当前题目正确率: {correct_count/total_questions*100:.2f}%")
 
-    # 导出 jsonl (使用 config 中定义的路径)
+    # 导出 jsonl (保持 freq 字段名，但存的是分数)
     try:
-        print(f"💾 [Save] 正在导出记忆调用频次排序结果到: {freq_file}")
-        # 确保目录存在
+        print(f"💾 [Save] 正在导出记忆评分结果到: {freq_file}")
         os.makedirs(os.path.dirname(freq_file), exist_ok=True)
         
         with open(freq_file, "w", encoding="utf-8") as f:
-            for rank, (mid, freq) in enumerate(sorted_memories, start=1):
+            for rank, (mid, score) in enumerate(sorted_memories, start=1):
                 record = {
                     "rank": rank,
                     "memory_id": mid,
-                    "freq": int(freq),
+                    "freq": int(score), # 🔥 这里存的是分数 (-2, 0, 2, 4...)
                     "contents": id_to_content.get(mid, "")
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        print("✅ 调用频次 jsonl 导出完成！")
+        print("✅ 评分文件导出完成！")
     except Exception as e:
         print(f"❌ 导出失败: {e}")
 
-    # 可视化 (如果 config 开启)
+    # 可视化 (分数分布图)
     if cfg.experiment.visualize_memory:
-        print(f"🎨 [Visual] 正在生成频次分布图: {vis_image_file}")
+        print(f"🎨 [Visual] 正在生成分数分布图: {vis_image_file}")
         try:
             ids = [m[0] for m in sorted_memories]
-            counts = [m[1] for m in sorted_memories]
+            scores = [m[1] for m in sorted_memories]
             
             display_limit = 30
             if len(ids) > display_limit * 2:
                 plot_ids = ids[:display_limit] + ["..."] + ids[-display_limit:]
-                plot_counts = counts[:display_limit] + [0] + counts[-display_limit:]
-                colors = ['skyblue'] * display_limit + ['white'] + ['salmon'] * display_limit
-                edge_colors = ['navy'] * display_limit + ['white'] + ['darkred'] * display_limit
+                plot_scores = scores[:display_limit] + [0] + scores[-display_limit:]
+                # 颜色区分：正分蓝，负分红，零分白
+                colors = []
+                for s in plot_scores:
+                    if s > 0: colors.append('skyblue')
+                    elif s < 0: colors.append('salmon')
+                    else: colors.append('lightgrey')
             else:
                 plot_ids = ids
-                plot_counts = counts
-                colors = 'skyblue'
-                edge_colors = 'navy'
+                plot_scores = scores
+                colors = ['skyblue' if s > 0 else 'salmon' if s < 0 else 'lightgrey' for s in plot_scores]
 
             plt.figure(figsize=(15, 6))
-            bars = plt.bar(plot_ids, plot_counts, color=colors, edgecolor=edge_colors)
-            plt.title(f'Memory Usage Distribution', fontsize=14)
+            # 画一条 0 分线
+            plt.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+            
+            bars = plt.bar(plot_ids, plot_scores, color=colors, edgecolor='navy')
+            plt.title(f'Memory Utility Score (Correct=+2, Wrong=-2)', fontsize=14)
+            plt.ylabel('Score')
             plt.xticks(rotation=90, fontsize=8) 
             
             # 显示数值
             for i, bar in enumerate(bars):
                 height = bar.get_height()
                 if plot_ids[i] != "...": 
-                    plt.text(bar.get_x() + bar.get_width()/2., height, f'{int(height)}',
-                             ha='center', va='bottom', fontsize=8)
+                    # 正分显示在条上方，负分显示在条下方
+                    y_pos = height if height >= 0 else height - (max(scores)*0.05)
+                    va = 'bottom' if height >= 0 else 'top'
+                    plt.text(bar.get_x() + bar.get_width()/2., y_pos, f'{int(height)}',
+                             ha='center', va=va, fontsize=8)
             
             plt.tight_layout()
             plt.savefig(vis_image_file, dpi=300)
@@ -376,9 +496,9 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
         except ImportError:
             print("❌ 缺少 matplotlib")
     else:
-        print("\n🏆 [Top 10 Hot Memories]")
-        for mid, count in sorted_memories[:10]:
-            print(f"   ID: {mid:<5} | Count: {count}")
+        print("\n🏆 [Top 10 High-Utility Memories]")
+        for mid, score in sorted_memories[:10]:
+            print(f"   ID: {mid:<5} | Score: {score}")
 
 # ==========================================
 # 4. 主程序 (Hydra Managed)
