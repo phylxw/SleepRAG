@@ -59,7 +59,7 @@ experiment:
   mode: "rag" # "baseline", "rag", "all"
   dataset_name: "DigitalLearningGmbH/MATH-lighteval"
   dataset_config: "algebra"
-  debug_num: null # 设置为 null 跑全量，数字用于调试
+  debug_num: 20 # 设置为 null 跑全量，数字用于调试
   visualize_memory: True
   #字段映射配置
   field_map:
@@ -68,6 +68,8 @@ experiment:
   # FlashRAG 检索参数
   retrieval_topk: 3
   retrieval_method: "bm25"
+
+  custom_test_file: "${paths.root}/AMATH-lighteval_wrong_questions.jsonl"
 
   prompts:
       rag_system: |
@@ -84,6 +86,27 @@ experiment:
 
         ### Answer:
         Let's think step by step.
+
+
+eval_compare:
+  # 模式: "original" (只测原始), "optimized" (只测优化), "both" (对比测试)
+  mode: "both"
+  wrong_num: null # 设置为 null 跑全量，数字用于调试
+  # 错题集路径 (默认读取 wrong_filter.py 生成的文件)
+  wrong_file: "${paths.root}/AMATH-lighteval_wrong_questions.jsonl"
+  
+  # [原始记忆] 配置
+  original:
+    # 原始语料路径 (通常由 pre.py 生成)
+    corpus_path: "${paths.root}/MATH-lighteval_corpus.jsonl"
+    index_path: "${paths.root}/MATH-lighteval_bm25_index"
+  # [优化后记忆] 配置
+  optimized:
+    # 优化后记忆文件 (optimizer.py 生成)
+    memory_file: "${paths.optimized_memory}"
+    # 转换后的临时语料路径
+    corpus_path: "${paths.root}/AMATH-lighteval_optimized_corpus.jsonl"
+    index_path: "${paths.root}/AMATH-lighteval_optimized_bm25_index"
 
 # 3. 优化器 (Optimizer) 参数
 optimizer:
@@ -116,3 +139,17 @@ optimizer:
       ⚠️ IMPORTANT: You MUST put the final answer within \boxed{{}}. For example: \boxed{{10}} or \boxed{{x+1}}.
       原始记忆：
       {text}
+
+# 🔥 新增: 错题本配置
+wrong_set:
+  # 你想从哪些日志里提取错题？(支持列表)
+  input_logs: 
+    - "${paths.root}/MATH-lighteval_sglang_rag_20251220_082725.txt"
+    - "${paths.root}/eval_MATH-lighteval_sglang_rag_20251220_090242.txt"
+  
+  # 源测试集 (用来根据ID查原始题目内容)
+  # 注意：这里默认指向 pre.py 生成的标准测试集
+  source_test_file: "${paths.root}/MATH-lighteval_test_data.jsonl" 
+  
+  # 输出的错题集文件
+  output_file: "${paths.root}/AMATH-lighteval_wrong_questions.jsonl"
