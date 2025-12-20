@@ -191,17 +191,11 @@ def evaluate_results(results, experiment_name, result_log_file):
 # ==========================================
 
 def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
-    """
-    修改版：
-    1. 将优化后的记忆库 (optimized_memory) 转换为 FlashRAG corpus 格式
-    2. 提取测试集
-    """
+    """准备数据：下载、切分、生成 corpus.jsonl 和 test.jsonl"""
     dataset_name = cfg.experiment.dataset_name
     dataset_config = cfg.experiment.dataset_config
-    # 🔥 核心修改：读取优化后的记忆文件路径
-    memory_source_file = cfg.paths.optimized_memory 
-
-    print(f"📥 [Step 1] 正在加载测试数据集: {dataset_name}...")
+    
+    print(f"📥 [Step 1] 正在加载数据集: {dataset_name} (Config: {dataset_config})...")
     try:
         if dataset_config:
             dataset = load_dataset(dataset_name, dataset_config)
@@ -213,37 +207,27 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
 
     q_col = cfg.experiment.field_map.question
     a_col = cfg.experiment.field_map.answer
+    
+    split_train = "train"
     split_test = "test"
 
-    # --- A. 适配记忆库: Optimized Memory -> Corpus ---
-    # 🔥 核心修改：不再读取 train 集，而是读取 memory_source_file
-    print(f"🔨 [Memory] 正在转换优化后的记忆库: {memory_source_file} -> {corpus_file}")
+    # --- A. 构建记忆库 (Train) ---
+    if not os.path.exists(corpus_file):
+        print(f"🔨 [Memory] 正在将 {split_train} 集转换为记忆库: {corpus_file}...")
+        if split_train not in dataset:
+            print(f"⚠️ 警告: 数据集没有 {split_train} 划分！")
+            return False
+
+        with open(corpus_file, "w", encoding="utf-8") as f:
+            for i, item in enumerate(tqdm(dataset[split_train])):
+                q_text = item.get(q_col, "")
+                a_text = item.get(a_col, "")
+                # 构建检索内容
+                content = f"Question: {q_text}\nAnswer: {a_text}"
+                f.write(json.dumps({"id": str(i), "contents": content}) + "\n")
+    else:
+        print(f"✅ [Memory] 检测到现有记忆库: {corpus_file}，跳过构建。")
     
-    if not os.path.exists(memory_source_file):
-        print(f"❌ 错误: 找不到优化后的记忆文件: {memory_source_file}")
-        print("   请确保 config.yaml 中的 paths.optimized_memory 路径正确且文件存在。")
-        return False
-
-    # 强制重新转换，确保使用的是最新的优化记忆
-    with open(memory_source_file, "r", encoding="utf-8") as fin, open(corpus_file, "w", encoding="utf-8") as fout:       
-        count = 0
-        for line in tqdm(fin, desc="Converting Memory"):
-            try:
-                item = json.loads(line)
-                # 优先使用 optimizer 生成的 question 字段 (可能是聚合/扩写过的)，如果没有则回退到 contents
-                content_val = item.get("question") or item.get("contents", "")
-                
-                # 构造 FlashRAG 标准格式
-                new_item = {
-                    "id": str(item.get("id")),
-                    "contents": content_val
-                }
-                fout.write(json.dumps(new_item) + "\n")
-                count += 1
-            except json.JSONDecodeError:
-                continue
-    print(f"✅ 记忆库转换完成，共处理 {count} 条记忆。")
-
     # --- B. 准备测试集 (Test) ---
     debug_num = cfg.experiment.debug_num
     print(f"🔨 [Test] 正在提取测试集 (样本数: {debug_num if debug_num else 'ALL'})...")
@@ -260,12 +244,12 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
             
         for i, item in enumerate(test_data):
             q_text = item.get(q_col, "")
-            raw_ans = item.get(a_col, "") 
+            raw_ans = item.get(a_col, "")
             
             f.write(json.dumps({
                 "id": str(i),
                 "question": q_text,
-                "golden_answers": [str(raw_ans)] 
+                "golden_answers": [str(raw_ans)]
             }) + "\n")
     return True
 
@@ -411,13 +395,12 @@ def main(cfg: DictConfig):
     dataset_tag = cfg.experiment.dataset_name.split('/')[-1]
     
     # 定义中间文件路径
-    # 🔥 修改这里：文件名加上 _optimized，与 eval.py 逻辑保持一致
-    corpus_file = os.path.join(root_dir, f"{dataset_tag}_optimized_corpus.jsonl")
+    corpus_file = os.path.join(root_dir, f"{dataset_tag}_corpus.jsonl")
     test_file = os.path.join(root_dir, f"{dataset_tag}_test_data.jsonl")
-    index_dir = os.path.join(root_dir, f"{dataset_tag}_optimized_bm25_index")
+    index_dir = os.path.join(root_dir, f"{dataset_tag}_bm25_index")
     
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    result_log_file = os.path.join(root_dir, f"eval_{dataset_tag}_{cfg.model.source}_{cfg.experiment.mode}_{timestamp}.txt")
+    result_log_file = os.path.join(root_dir, f"{dataset_tag}_{cfg.model.source}_{cfg.experiment.mode}_{timestamp}.txt")
     vis_image_file = os.path.join(root_dir, f"memory_distribution_{timestamp}.png")
 
     if os.path.exists(result_log_file): os.remove(result_log_file)

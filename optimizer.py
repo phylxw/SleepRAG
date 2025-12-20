@@ -1,8 +1,7 @@
 import os
 import json
 import time
-from typing import Dict, List, Tuple, Any
-from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Tuple, Set
 
 import numpy as np
 import torch
@@ -10,44 +9,14 @@ from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import google.generativeai as genai
 
+# Hydra
+import hydra
+from omegaconf import DictConfig
 
-# ================= 配置区域 =================
-
-# 1. LLM 配置
-MODEL_SOURCE = "huggingface"   # "huggingface" 或 "gemini"
-
-HF_MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-
-# 2. 文件路径
-CLUSTERED_FILE = "AMATH-lighteval_auto_clustered_result.jsonl"
-CLUSTER_SUMMARY_FILE = "AMATH-lighteval_cluster_summary.jsonl"
-MEM_FREQ_FILE = "MATH-lighteval_memory_freq_20251218_150403.jsonl"
-OUTPUT_OPTIMIZED_FILE = "AMATH-lighteval_optimized_memory_k50.jsonl"
-
-# 3. 优化逻辑参数
-TOP_K_HIGH = 50                # 高频 anchor 数量
-BOTTOM_K_LOW = 50               # 低频扩写数量
-LOW_FREQ_THRESHOLD = 2          # 频次阈值
-TOP_N_SIMILAR_IN_CLUSTER = 5    # 类内合并邻居数
-
-# 4. 相似度 embedding 模型
-EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
-
-# 5. LLM 并行与批量控制
-# 对于多卡环境，增加 LLM_BATCH_SIZE 可以提高显卡利用率
-LLM_BATCH_SIZE = 8          # 批量处理大小（根据显存调整，多卡可调大）
-MAX_NEW_TOKENS = 512        # 输出长度
-MAX_INPUT_TOKENS = 2048     # 输入长度
-MAX_WORKERS = 4             # Gemini 并行请求数（仅在 MODEL_SOURCE="gemini" 时有效）
-
-# ===========================================
-
+# ================= 全局变量 (保持原逻辑) =================
 GLOBAL_MODEL = None
 GLOBAL_TOKENIZER = None
-
-
+GLOBAL_SGLANG_CLIENT = None
 # =============== 工具函数 ===============
 
 def clean_special_chars(text: str) -> str:
@@ -65,84 +34,106 @@ def has_cuda() -> bool:
 
 # =============== LLM 初始化与调用 ===============
 
-def init_llm():
-    """初始化 LLM"""
-    global GLOBAL_MODEL, GLOBAL_TOKENIZER
+# ================= 全局变量 =================
+GLOBAL_MODEL = None
+GLOBAL_TOKENIZER = None
+GLOBAL_SGLANG_CLIENT = None  # 🔥 新增
 
-    if MODEL_SOURCE == "gemini":
-        if GEMINI_API_KEY:
-            genai.configure(api_key=GEMINI_API_KEY)
-            print(f"🤖 [Init] Gemini API ({GEMINI_MODEL_NAME}) 已配置")
+def init_llm(cfg: DictConfig):
+    """初始化 LLM"""
+    global GLOBAL_MODEL, GLOBAL_TOKENIZER, GLOBAL_SGLANG_CLIENT
+    
+    model_source = cfg.model.source
+
+    if model_source == "gemini":
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if api_key:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            print(f"🤖 [Init] Gemini API ({cfg.model.gemini_name}) 已配置")
         else:
-            print("⚠️ [Init] 未检测到 GEMINI_API_KEY")
-    elif MODEL_SOURCE == "huggingface":
-        print(f"📥 [Init] 正在加载本地模型: {HF_MODEL_NAME} ...")
-        try:
-            GLOBAL_TOKENIZER = AutoTokenizer.from_pretrained(HF_MODEL_NAME, trust_remote_code=True)
-            # 必须设置 padding_side='left' 以支持批量推理
-            GLOBAL_TOKENIZER.padding_side = 'left'
-            if GLOBAL_TOKENIZER.pad_token is None:
-                GLOBAL_TOKENIZER.pad_token = GLOBAL_TOKENIZER.eos_token
+            print("⚠️ [Init] 未检测到 GEMINI_API_KEY，Gemini 相关功能会被跳过")
             
-            # device_map="auto" 会自动将模型分布在多张显卡上
+    elif model_source == "huggingface":
+        hf_name = cfg.model.hf_name
+        print(f"📥 [Init] 正在加载本地模型: {hf_name} ...")
+        try:
+            GLOBAL_TOKENIZER = AutoTokenizer.from_pretrained(hf_name, trust_remote_code=True)
             GLOBAL_MODEL = AutoModelForCausalLM.from_pretrained(
-                HF_MODEL_NAME,
+                hf_name,
                 device_map="auto",
                 torch_dtype="auto",
                 trust_remote_code=True
             ).eval()
-            print("✅ [Init] 本地模型多卡分发加载完成！")
+            
+            # 🔥 [Critical Fix] 批量生成必须设置 left padding
+            GLOBAL_TOKENIZER.padding_side = 'left'
+            if GLOBAL_TOKENIZER.pad_token is None:
+                GLOBAL_TOKENIZER.pad_token = GLOBAL_TOKENIZER.eos_token
+                GLOBAL_TOKENIZER.pad_token_id = GLOBAL_TOKENIZER.eos_token_id
+            
+            print(f"✅ [Init] 本地模型加载完成！(Padding side set to left)")
         except Exception as e:
             print(f"❌ [Init] 本地模型加载失败: {e}")
+            print("💡 提示: 请检查 HuggingFace 权限和网络")
+
+    elif model_source == "sglang":
+        try:
+            from openai import OpenAI
+            # 从配置读取 URL，默认本地端口
+            api_url = cfg.model.get("sglang_api_url", "http://127.0.0.1:30000/v1")
+            api_key = "EMPTY" # SGLang 本地部署不需要真实 Key
+            
+            GLOBAL_SGLANG_CLIENT = OpenAI(base_url=api_url, api_key=api_key)
+            print(f"✅ [Init] SGLang Client 已连接至 {api_url}")
+        except ImportError:
+            print("❌ [Init] 缺少 openai 库，请运行 `pip install openai`")
 
 
-def call_llm(prompt: str, max_new_tokens: int = MAX_NEW_TOKENS) -> str:
-    """单条调用接口"""
-    # 包装批量接口
-    res = call_llm_batch([prompt], max_new_tokens=max_new_tokens)
-    return res[0] if res else ""
+def call_llm(prompt: str, cfg: DictConfig, max_new_tokens: int = None) -> str:
+    """统一的大模型调用接口，单条调用"""
+    model_source = cfg.model.source
+    # 如果没传 max_new_tokens，就用 config 里的默认值
+    if max_new_tokens is None:
+        max_new_tokens = cfg.model.max_new_tokens
 
+    # --- Gemini ---
+    if model_source == "gemini":
+        if not os.environ.get("GEMINI_API_KEY"):
+            return "Skipped (No GEMINI_API_KEY)"
+        try:
+            import google.generativeai as genai
+            model = genai.GenerativeModel(cfg.model.gemini_name)
+            print("  🤖 [Gemini] 正在生成...", end="", flush=True)
+            resp = model.generate_content(prompt)
+            print(" 完成")
+            return clean_special_chars(resp.text.strip())
+        except Exception as e:
+            print(f"\n❌ [Gemini Error]: {e}")
+            return ""
 
-def call_llm_batch(prompts: List[str], max_new_tokens: int = MAX_NEW_TOKENS) -> List[str]:
-    """批量推理接口：实现多卡并行/并发"""
-    if not prompts:
-        return []
-
-    # --- Gemini：使用线程池模拟并行推理 ---
-    if MODEL_SOURCE == "gemini":
-        def single_gemini_call(p):
-            try:
-                model = genai.GenerativeModel(GEMINI_MODEL_NAME)
-                resp = model.generate_content(p)
-                return clean_special_chars(resp.text.strip())
-            except Exception:
-                return ""
-        
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            print(f" 🤖 [Gemini-Parallel] 正在并发处理 {len(prompts)} 条请求...")
-            results = list(executor.map(single_gemini_call, prompts))
-        return results
-
-    # --- HuggingFace：利用 batching 和 device_map 进行硬件并行 ---
-    if MODEL_SOURCE == "huggingface":
+    # --- HuggingFace 本地 ---
+    elif model_source == "huggingface":
         if GLOBAL_MODEL is None:
-            return [""] * len(prompts)
+            print("⚠️ [Local] LLM 尚未初始化")
+            return ""
 
         try:
-            print(f" 🚀 [Local-Batch] 正在并行生成 {len(prompts)} 条 (Batch Size={LLM_BATCH_SIZE})...", end="", flush=True)
-            
-            text_list = []
-            for p in prompts:
-                messages = [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": p}]
-                text = GLOBAL_TOKENIZER.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-                text_list.append(text)
-
+            print("  🚀 [Local] 正在生成...", end="", flush=True)
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ]
+            text = GLOBAL_TOKENIZER.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
             model_inputs = GLOBAL_TOKENIZER(
-                text_list,
+                [text],
                 return_tensors="pt",
-                padding=True,
                 truncation=True,
-                max_length=MAX_INPUT_TOKENS,
+                max_length=cfg.model.max_input_len,
             ).to(GLOBAL_MODEL.device)
 
             with torch.no_grad():
@@ -150,8 +141,112 @@ def call_llm_batch(prompts: List[str], max_new_tokens: int = MAX_NEW_TOKENS) -> 
                     model_inputs.input_ids,
                     attention_mask=model_inputs.attention_mask,
                     max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    pad_token_id=GLOBAL_TOKENIZER.pad_token_id
+                    do_sample=False
+                )
+            # 只取新增的部分
+            generated_ids = [
+                output_ids[len(input_ids):]
+                for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+            ]
+            response = GLOBAL_TOKENIZER.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            print(" 完成")
+            return clean_special_chars(response.strip())
+        except Exception as e:
+            print(f"\n❌ [Local Error]: {e}")
+            return ""
+
+    # --- SGLang ---
+    elif model_source == "sglang":
+        if GLOBAL_SGLANG_CLIENT is None:
+            return "Skipped (Client Not Initialized)"
+        
+        model_name = cfg.model.get("sglang_model_name", "Qwen/Qwen3-4B-Instruct-2507")
+        try:
+            print("  🚀 [SGLang] 正在推理...", end="", flush=True)
+            resp = GLOBAL_SGLANG_CLIENT.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                max_tokens=max_new_tokens
+            )
+            content = resp.choices[0].message.content
+            print(" 完成")
+            return clean_special_chars(content.strip())
+        except Exception as e:
+            print(f"\n❌ [SGLang Error]: {e}")
+            return ""
+
+    return ""
+
+
+def call_llm_batch(prompts: List[str], cfg: DictConfig, max_new_tokens: int = None) -> List[str]:
+    """批量调用 LLM"""
+    if not prompts:
+        return []
+    
+    model_source = cfg.model.source
+    if max_new_tokens is None:
+        max_new_tokens = cfg.model.max_new_tokens
+
+    # Gemini：简单循环
+    if model_source == "gemini":
+        results = []
+        for p in prompts:
+            results.append(call_llm(p, cfg, max_new_tokens=max_new_tokens))
+        return results
+
+    # SGLang: 简单循环调用 (Server端会自动处理并发)
+    if model_source == "sglang":
+        results = []
+        # 虽然这里写的是循环，但 SGLang Server 的吞吐很高，速度通常比本地 HF Batch 快
+        # 如果需要极致并发，可以使用 asyncio 或 ThreadPoolExecutor，但简单循环通常足够快且稳定
+        for p in prompts:
+            results.append(call_llm(p, cfg, max_new_tokens=max_new_tokens))
+        return results
+
+    # HuggingFace 本地
+    if model_source == "huggingface":
+        if GLOBAL_MODEL is None:
+            print("⚠️ [Local] LLM 尚未初始化")
+            return [""] * len(prompts)
+
+        try:
+            print(f"  🚀 [Local-Batch] 正在批量生成 {len(prompts)} 条...", end="", flush=True)
+            
+            messages_list = [
+                [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": p}
+                ]
+                for p in prompts
+            ]
+            text_list = [
+                GLOBAL_TOKENIZER.apply_chat_template(
+                    msgs,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+                for msgs in messages_list
+            ]
+
+            # 批量 Tokenize + Padding
+            model_inputs = GLOBAL_TOKENIZER(
+                text_list,
+                return_tensors="pt",
+                padding=True, # 关键
+                truncation=True,
+                max_length=cfg.model.max_input_len,
+            ).to(GLOBAL_MODEL.device)
+
+            with torch.no_grad():
+                generated_ids = GLOBAL_MODEL.generate(
+                    model_inputs.input_ids,
+                    attention_mask=model_inputs.attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False
                 )
 
             results = []
@@ -161,46 +256,40 @@ def call_llm_batch(prompts: List[str], max_new_tokens: int = MAX_NEW_TOKENS) -> 
                 results.append(clean_special_chars(text.strip()))
             print(" 完成")
             return results
+
         except Exception as e:
-            print(f"\n❌ [Local Error]: {e}")
+            print(f"\n❌ [Local-Batch Error]: {e}")
             return [""] * len(prompts)
 
     return [""] * len(prompts)
 
 
-# =============== 任务 Prompt 构造 ===============
+# ===== 高频 & 低频记忆的 LLM 操作 =====
+def summarize_high_freq_prompt(group_texts: List[str], cfg: DictConfig) -> str:
+    items_formatted = "\n".join(
+        f"[{i+1}] {t}" for i, t in enumerate(group_texts)
+    )
+    template = cfg.optimizer.prompts.summarize_high_freq
+    prompt = template.format(items_formatted=items_formatted)
+    return prompt
 
-def get_summarize_prompt(group_texts: List[str]) -> str:
-    """构造高频合并 Prompt"""
-    items_formatted = "\n".join(f"[{i+1}] {t}" for i, t in enumerate(group_texts))
-    return f"""你是数学助教。下面是一组属于同一题型的记忆条目，它们都来自同一个聚类（同类问题）。
-请将它们合并成**一条更完整、更抽象的记忆**，要求：
-1. 不改变任何结论，也不要引入新的数值或额外事实。
-2. 保留所有关键条件、公式与解题结论。
-3. 适当总结共同的解题思路，可以合并重复信息。
-4. 用English写成一段或两段连续文本，不要分条列出原题号。
+def expand_low_freq_memory_prompt(text: str, cfg: DictConfig) -> str:
+    """构造低频记忆扩写的 prompt"""
+    template = cfg.optimizer.prompts.expand_low_freq
+    prompt = template.format(text=text)
+    
+    return prompt
 
-待合并的记忆条目如下：
-{items_formatted}
-"""
-
-def get_expand_prompt(text: str) -> str:
-    """构造低频扩写 Prompt"""
-    return f"""你是数学助教。下面是一条数学题目的记忆内容。
-请在 **不改变题目条件和答案、不添加任何新数值或事实** 的前提下，对它进行语义扩写：
-1. 可以增加对题目考察点的解释和背景说明。
-2. 可以加入同义改写、更多自然语言表述，以便未来更容易被检索到。
-3. 输出一段或两段English文本，不要丢失原始信息。
-
-原始记忆：
-{text}
-"""
-
-
-# =============== 数据加载与向量计算 (保持原逻辑) ===============
+# =============== 数据加载 ===============
 
 def load_clustered_memories(path: str) -> Tuple[Dict[str, dict], List[str]]:
-    memories, order = {}, []
+    memories: Dict[str, dict] = {}
+    order: List[str] = []
+    print(f"📥 正在加载聚类后的记忆文件: {path}")
+    if not os.path.exists(path):
+        print(f"❌ 文件不存在: {path}")
+        return {}, []
+
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip(): continue
@@ -208,153 +297,306 @@ def load_clustered_memories(path: str) -> Tuple[Dict[str, dict], List[str]]:
             mid = str(obj["id"])
             memories[mid] = obj
             order.append(mid)
+    print(f"✅ 共加载 {len(memories)} 条记忆")
     return memories, order
 
+
 def load_cluster_summary(path: str) -> Dict[int, List[str]]:
-    cluster_to_ids = {}
+    cluster_to_ids: Dict[int, List[str]] = {}
+    print(f"📥 正在加载聚类摘要文件: {path}")
+    if not os.path.exists(path):
+        print(f"❌ 文件不存在: {path}")
+        return {}
+
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip(): continue
             obj = json.loads(line)
-            cluster_to_ids[int(obj["cluster_id"])] = [str(x) for x in obj.get("memory_ids", [])]
+            cid = int(obj["cluster_id"])
+            ids = [str(x) for x in obj.get("memory_ids", [])]
+            cluster_to_ids[cid] = ids
+    print(f"✅ 共加载 {len(cluster_to_ids)} 个聚类")
     return cluster_to_ids
 
+
 def load_memory_freq(path: str) -> Dict[str, int]:
-    freq_map = {}
+    freq_map: Dict[str, int] = {}
+    print(f"📥 正在加载记忆频次文件: {path}")
+    if not os.path.exists(path):
+        print(f"❌ 文件不存在: {path}")
+        return {}
+
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip(): continue
             obj = json.loads(line)
+            # 兼容 memory_id 或 id 字段
             mid = str(obj.get("memory_id", obj.get("id", "")))
-            if mid: freq_map[mid] = int(obj.get("freq", 0))
+            if not mid: continue
+            freq = int(obj.get("freq", 0))
+            freq_map[mid] = freq
+    print(f"✅ 频次记录数: {len(freq_map)}")
     return freq_map
 
-def build_embeddings_for_memories(memories: Dict[str, dict]) -> Dict[str, np.ndarray]:
+
+# =============== Embedding & 相似度 ===============
+
+def build_embeddings_for_memories(memories: Dict[str, dict], model_name: str) -> Dict[str, np.ndarray]:
     device = "cuda" if has_cuda() else "cpu"
-    model = SentenceTransformer(EMBEDDING_MODEL, device=device)
+    print(f"🚀 正在计算记忆向量 ({model_name}) on {device}...")
+    model = SentenceTransformer(model_name, device=device)
+
     ids = list(memories.keys())
-    texts = [memories[mid].get("question") or memories[mid].get("contents", "") for mid in ids]
-    embeddings = model.encode(texts, batch_size=32, show_progress_bar=True, normalize_embeddings=True)
-    return {mid: embeddings[i] for i, mid in enumerate(ids)}
+    texts = []
+    for mid in ids:
+        rec = memories[mid]
+        text = rec.get("question") or rec.get("contents", "")
+        texts.append(text)
+
+    embeddings = model.encode(
+        texts,
+        batch_size=32,
+        show_progress_bar=True,
+        normalize_embeddings=True
+    )
+    id_to_emb = {mid: embeddings[i] for i, mid in enumerate(ids)}
+    print(f"✅ 向量构建完成，共 {len(id_to_emb)} 条")
+    return id_to_emb
+
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b))
 
-def select_high_low_ids(freq_map: Dict[str, int], top_k_high: int, bottom_k_low: int, low_freq: int):
-    items = sorted(freq_map.items(), key=lambda x: -x[1])
-    high_ids = [mid for mid, f in items[:top_k_high]]
-    items_asc = sorted(freq_map.items(), key=lambda x: x[1])
-    low_ids, zero_ids = [], []
-    for mid, f in items_asc:
-        if f == 0: zero_ids.append(mid)
-        elif f == low_freq and len(low_ids) < bottom_k_low: low_ids.append(mid)
+
+# =============== 高频/低频集合选择 ===============
+
+def select_high_low_ids(
+    freq_map: Dict[str, int],
+    top_k_high: int,
+    bottom_k_low: int,
+    low_freq_for_low_only: int = 1
+):
+    items = list(freq_map.items())
+    # 高频：按 freq 降序
+    sorted_desc = sorted(items, key=lambda x: -x[1])
+    high_ids = [mid for mid, f in sorted_desc[:top_k_high]]
+
+    # 低频：按 freq 升序
+    sorted_asc = sorted(items, key=lambda x: x[1])
+    low_ids = []
+    zero_ids = []
+    for mid, f in sorted_asc:
+        if f == 0:
+            zero_ids.append(mid)
+            continue
+        if f == low_freq_for_low_only:
+            low_ids.append(mid)
+        if len(low_ids) >= bottom_k_low:
+            break
+
+    print(f"🔥 高频 anchor 数量: {len(high_ids)}")
+    print(f"🧊 0 次调用的记忆数量: {len(zero_ids)}（之后会删除）")
+    print(f"🥶 低频扩写候选(freq={low_freq_for_low_only})数量: {len(low_ids)} (最多 bottom_k={bottom_k_low})")
     return set(high_ids), set(low_ids), set(zero_ids)
 
 
-# =============== 主优化逻辑 (重点修改：批量并行) ===============
+# =============== 主优化逻辑 (Hydra Managed) ===============
 
-def optimize_memory():
-    init_llm()
-    memories, id_order = load_clustered_memories(CLUSTERED_FILE)
-    cluster_to_ids = load_cluster_summary(CLUSTER_SUMMARY_FILE)
-    freq_map = load_memory_freq(MEM_FREQ_FILE)
-    for mid in memories: freq_map.setdefault(mid, 0)
+@hydra.main(version_base=None, config_path="conf", config_name="config")
+def optimize_memory(cfg: DictConfig):
+    # 0. 初始化 LLM
+    init_llm(cfg)
 
-    high_ids, low_ids, zero_ids = select_high_low_ids(freq_map, TOP_K_HIGH, BOTTOM_K_LOW, LOW_FREQ_THRESHOLD)
-    id_to_emb = build_embeddings_for_memories(memories)
+    # 1. 读入基础数据 (使用 config 中的路径)
+    cluster_file = cfg.paths.cluster_output
+    summary_file = cfg.paths.cluster_summary
+    freq_file = cfg.paths.freq_file
+    output_file = cfg.paths.optimized_memory
 
-    to_delete_ids = set(zero_ids)
-    merged_consumed_ids = set()
+    memories, id_order = load_clustered_memories(cluster_file)
+    cluster_to_ids = load_cluster_summary(summary_file)
+    freq_map = load_memory_freq(freq_file)
 
-    # --- 阶段 4：高频聚合 (批量收集模式) ---
-    print("\n========== 高频记忆聚合阶段 (多卡并行准备) ==========")
+    if not memories:
+        print("❌ 无法加载记忆数据，程序退出。")
+        return
+
+    # 为所有记忆补齐频次
+    for mid in memories.keys():
+        freq_map.setdefault(mid, 0)
+
+    # 2. 选出高频、低频、0 频集合 (使用 config 中的参数)
+    high_ids, low_ids, zero_ids = select_high_low_ids(
+        freq_map,
+        top_k_high=cfg.optimizer.top_k_high,
+        bottom_k_low=cfg.optimizer.bottom_k_low,
+        low_freq_for_low_only=cfg.optimizer.low_freq_threshold
+    )
+
+    # 3. 准备向量
+    id_to_emb = build_embeddings_for_memories(memories, cfg.model.embedding_name)
+
+# 4. 高频：类内聚合（merge）
+    merged_consumed_ids = set()      
+    to_delete_ids = set()            
+
+    print("\n========== 高频记忆聚合阶段 (Batch Optimized) ==========")
     high_ids_sorted = sorted(list(high_ids), key=lambda x: -freq_map.get(x, 0))
+    top_n_similar = cfg.optimizer.top_n_similar
     
-    aggregation_tasks = [] # 存储 (anchor_id, neighbors, prompt)
+    # 临时缓存队列
+    batch_size = cfg.optimizer.llm_batch_size
+    batch_prompts = []
+    batch_metadata = [] # 存元数据，用于回调更新: (rec_anchor, group_ids)
 
     for anchor_id in high_ids_sorted:
-        if anchor_id not in memories or anchor_id in merged_consumed_ids: continue
-        
+        if anchor_id not in memories: continue
+        if anchor_id in merged_consumed_ids: continue
+
         rec_anchor = memories[anchor_id]
-        cid = rec_anchor.get("cluster_id")
-        if cid is None: continue
+        cluster_id = rec_anchor.get("cluster_id")
+        if cluster_id is None: continue
+        cluster_id = int(cluster_id)
         
-        members = [str(x) for x in cluster_to_ids.get(int(cid), [])]
-        candidates = [m for m in members if m != anchor_id and m not in merged_consumed_ids]
+        cluster_member_ids = [str(x) for x in cluster_to_ids.get(cluster_id, [])]
+        if not cluster_member_ids: continue
+
+        candidates = [
+            mid for mid in cluster_member_ids
+            if mid != anchor_id and mid not in merged_consumed_ids
+        ]
         if not candidates: continue
 
         anchor_emb = id_to_emb.get(anchor_id)
-        sims = [(m, cosine_similarity(anchor_emb, id_to_emb[m])) for m in candidates if m in id_to_emb]
+        if anchor_emb is None: continue
+
+        sims = []
+        for mid in candidates:
+            emb = id_to_emb.get(mid)
+            if emb is None: continue
+            sims.append((mid, cosine_similarity(anchor_emb, emb)))
+
         if not sims: continue
 
-        neighbors = [m for m, _ in sorted(sims, key=lambda x: -x[1])[:TOP_N_SIMILAR_IN_CLUSTER]]
-        
-        # 预备文本
+        sims_sorted = sorted(sims, key=lambda x: -x[1])
+        neighbors = [mid for mid, _ in sims_sorted[:top_n_similar]]
         group_ids = [anchor_id] + neighbors
-        group_texts = [f"[ID {mid}] {memories[mid].get('question') or memories[mid].get('contents', '')}" for mid in group_ids]
+
+        print(f"\n🔥 [Plan] Anchor {anchor_id} (freq={freq_map[anchor_id]}) 准备合并 top-{len(neighbors)} 邻居")
         
-        # 记录任务
-        aggregation_tasks.append({
-            "anchor_id": anchor_id,
-            "neighbors": neighbors,
-            "prompt": get_summarize_prompt(group_texts)
+        # 🔥 关键修改 1: 立即标记邻居为“已消耗”，防止当前 Batch 后面的 Anchor 抢占
+        # 虽然 LLM 还没跑完，但我们先占座，保证贪心逻辑的顺序性
+        for mid in neighbors:
+            merged_consumed_ids.add(mid)
+            # 只有被合并且频次低的才删除
+            if freq_map.get(mid, 0) < cfg.optimizer.low_freq_threshold:
+                to_delete_ids.add(mid)
+        
+        # 构造 Prompt 文本
+        group_texts = []
+        for mid in group_ids:
+            rec = memories[mid]
+            text = rec.get("question") or rec.get("contents", "")
+            group_texts.append(f"[ID {mid}] {text}")
+
+        # 生成 Prompt 并加入 Batch 队列
+        prompt = summarize_high_freq_prompt(group_texts, cfg)
+        batch_prompts.append(prompt)
+        batch_metadata.append({
+            "rec_anchor": rec_anchor,
+            "group_ids": group_ids,
+            "anchor_id": anchor_id
         })
 
-        # 标记消耗
-        for mid in neighbors: merged_consumed_ids.add(mid)
-
-    # 批量执行高频聚合
-    if aggregation_tasks:
-        prompts = [t["prompt"] for t in aggregation_tasks]
-        results = []
-        for i in range(0, len(prompts), LLM_BATCH_SIZE):
-            batch = prompts[i : i + LLM_BATCH_SIZE]
-            results.extend(call_llm_batch(batch))
-
-        for task, summary in zip(aggregation_tasks, results):
-            if not summary: continue
-            aid = task["anchor_id"]
-            neighbors = task["neighbors"]
+        # 🔥 关键修改 2: 凑够 Batch 立即执行
+        if len(batch_prompts) >= batch_size:
+            print(f"🚀 [Batch Execution] 并发执行 {len(batch_prompts)} 个高频聚合任务...")
+            outputs = call_llm_batch(batch_prompts, cfg)
             
-            rec = memories[aid]
+            # 回填结果
+            for task_info, summary_text in zip(batch_metadata, outputs):
+                if not summary_text:
+                    print(f"   ⚠️ LLM 返回为空，跳过 Anchor {task_info['anchor_id']}")
+                    continue
+                
+                rec = task_info['rec_anchor']
+                rec["original_question"] = rec.get("question") or rec.get("contents", "")
+                rec["question"] = summary_text
+                rec["merged_from_ids"] = task_info['group_ids']
+                rec["merge_type"] = "high_freq_anchor"
+            
+            # 清空队列
+            batch_prompts = []
+            batch_metadata = []
+
+    # 🔥 关键修改 3: 处理循环结束后剩余的任务
+    if batch_prompts:
+        print(f"🚀 [Batch Execution] 处理剩余的 {len(batch_prompts)} 个高频聚合任务...")
+        outputs = call_llm_batch(batch_prompts, cfg)
+        for task_info, summary_text in zip(batch_metadata, outputs):
+            if not summary_text: continue
+            rec = task_info['rec_anchor']
             rec["original_question"] = rec.get("question") or rec.get("contents", "")
-            rec["question"] = summary
-            rec["merged_from_ids"] = [aid] + neighbors
+            rec["question"] = summary_text
+            rec["merged_from_ids"] = task_info['group_ids']
             rec["merge_type"] = "high_freq_anchor"
-            
-            for mid in neighbors:
-                if freq_map.get(mid, 0) < LOW_FREQ_THRESHOLD:
-                    to_delete_ids.add(mid)
 
-    # --- 阶段 5：低频扩写 (批量收集模式) ---
-    print("\n========== 低频记忆扩写阶段 (多卡并行准备) ==========")
-    low_expand_ids = [mid for mid in low_ids if mid in memories and mid not in to_delete_ids]
+    # 5. 低频：扩写
+    print("\n========== 低频记忆扩写阶段 ==========")
+    # to_delete_ids.update(zero_ids)
+
+    low_expand_ids = [
+        mid for mid in low_ids
+        if mid in memories and mid not in to_delete_ids
+    ]
+    print(f"🥶 需要扩写的低频记忆条目数: {len(low_expand_ids)}")
+
+    low_expand_items = []
+    for mid in low_expand_ids:
+        rec = memories[mid]
+        base_text = rec.get("question") or rec.get("contents", "")
+        low_expand_items.append((mid, base_text))
+
+    batch_size = cfg.optimizer.llm_batch_size
+    total_low = len(low_expand_items)
     
-    if low_expand_ids:
-        expand_prompts = [get_expand_prompt(memories[mid].get("question") or memories[mid].get("contents", "")) for mid in low_expand_ids]
-        expand_results = []
-        for i in range(0, len(expand_prompts), LLM_BATCH_SIZE):
-            batch = expand_prompts[i : i + LLM_BATCH_SIZE]
-            expand_results.extend(call_llm_batch(batch))
+    for start in range(0, total_low, batch_size):
+        end = min(start + batch_size, total_low)
+        batch_items = low_expand_items[start:end]
+        batch_ids = [mid for (mid, _) in batch_items]
 
-        for mid, expanded in zip(low_expand_ids, expand_results):
-            if not expanded: continue
+        print(f"\n🥶 扩写低频记忆 Batch {start // batch_size + 1} / { (total_low + batch_size - 1) // batch_size }")
+        print(f"   IDs: {batch_ids}")
+
+        # 🔥 修正: 这里之前漏传了 cfg 参数，现在补上
+        batch_prompts = [
+            expand_low_freq_memory_prompt(base_text, cfg) 
+            for (_, base_text) in batch_items
+        ]
+        
+        batch_outputs = call_llm_batch(batch_prompts, cfg)
+
+        for (mid, base_text), expanded in zip(batch_items, batch_outputs):
+            if not expanded:
+                print(f"   ⚠️ LLM 返回为空，ID={mid} 保持原文不变")
+                continue
             rec = memories[mid]
-            rec["original_question"] = rec.get("question") or rec.get("contents", "")
+            rec["original_question"] = base_text
             rec["question"] = expanded
             rec["opt_type"] = "low_freq_expanded"
-
-    # --- 阶段 6：写出结果 ---
+    # 6. 写出新的记忆库
     print("\n========== 写出优化后的记忆库 ==========")
     kept_count = 0
-    with open(OUTPUT_OPTIMIZED_FILE, "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         for mid in id_order:
-            if mid in memories and mid not in to_delete_ids:
-                f.write(json.dumps(memories[mid], ensure_ascii=False) + "\n")
-                kept_count += 1
+            if mid not in memories: continue
+            if mid in to_delete_ids: continue
+            f.write(json.dumps(memories[mid], ensure_ascii=False) + "\n")
+            kept_count += 1
 
-    print(f"✅ 完成！保留: {kept_count}, 删除: {len(to_delete_ids)}")
-
+    print(f"✅ 新记忆库写入完成: {output_file}")
+    print(f"   保留记忆条目: {kept_count}")
+    print(f"   删除记忆条目: {len(to_delete_ids)}")
 
 if __name__ == "__main__":
     optimize_memory()
