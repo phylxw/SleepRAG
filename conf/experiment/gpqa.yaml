@@ -1,0 +1,79 @@
+# conf/experiment/gpqa.yaml
+# 用途: 使用记忆库 (默认还是 MATH) 去测试 GPQA 科学选择题
+
+mode: "all" # 可选: baseline, rag
+
+# ==========================================
+# 1. 记忆库配置 (Corpus)
+# ==========================================
+# 注意：通常我们还是用优化好的 MATH 库，或者你可以换成 Wikipedia
+corpus_dataset_name: "DigitalLearningGmbH/MATH-lighteval"
+corpus_dataset_config: "algebra"
+corpus_split: "train"
+
+# ==========================================
+# 2. 测试集配置 (Test: GPQA)
+# ==========================================
+test_dataset_name: "Idavidrein/gpqa"
+test_dataset_config: "gpqa_diamond" # 选项: gpqa_diamond (推荐), gpqa_main, gpqa_extended
+test_split: "train" # GPQA 只有 train split 用于 few-shot/eval
+
+start_index: 0
+debug_num: 20 # 调试时设小一点
+visualize_memory: True
+
+# ==========================================
+# 3. 字段映射
+# ==========================================
+# GPQA 的列名比较特殊，这里主要用于 load_dataset 初步读取
+field_map:
+  question: "Question"
+  answer: "Correct Answer"
+
+# ==========================================
+# 4. RAG 参数
+# ==========================================
+retrieval_topk: 3
+retrieval_method: "bm25"
+# 强化学习打分参数 (虽然选择题只有对错，没有过程分，但保留即可)
+reward: 2
+punishment: -1
+
+# ==========================================
+# 5. Prompts (专门针对选择题优化)
+# ==========================================
+prompts:
+  sys_msg : |
+    You are a math expert. Solve the following multiple-choice question. Solve the following question in a brief.Don't generate overly long reasoning paths.
+    ### Instruction:
+    1. Derive the answer step-by-step.
+    2. Compare your result with options (A) (B) (C) (D).
+    3. ⚠️ IMPORTANT: Output ONLY the option letter inside the box.
+    4. ⛔ DO NOT output the calculated number.
+
+    Example Format:
+    If the answer is option (A), output: \boxed{{A}}
+
+    ### Answer:
+    Let's think step by step.
+      
+  rag_system: |
+    Solve the following multiple-choice question.Solve the following question in a brief.Don't generate overly long reasoning paths.
+
+    Reference:
+    {reference}
+
+    ### Question:
+    {question}
+
+    ### Instruction:
+    1. Derive the answer step-by-step.
+    2. Compare your result with options (A) (B) (C) (D).
+    3. ⚠️ IMPORTANT: Output ONLY the option letter inside the box.
+    4. ⛔ DO NOT output the calculated number.
+
+    Example Format:
+    If the answer is option (A), output: \boxed{{A}}
+
+    ### Answer:
+    Let's think step by step.

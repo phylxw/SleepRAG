@@ -1,156 +1,46 @@
 # conf/config.yaml
-
 defaults:
   - _self_
+  - experiment: gpqa  # 🔥 在这里一键切换数据集！(对应 conf/experiment/math_to_hmmt.yaml)
+  - optimizer: default        # 🔥 在这里切换优化策略
+
 timestamp: "${now:%Y%m%d_%H%M%S}"
-# ================= 路径配置 (使用绝对路径) =================
+
+# ================= 路径配置 =================
 paths:
-  # 项目根目录，根据你的实际情况修改
-  root: "/root/workspace/jychen/ex" 
-  jsonl: "/root/workspace/jychen/ex/outputs/jsonl" 
-  png: "/root/workspace/jychen/ex/outputs/png" 
-  # 中间产物
-  cluster_output: "${paths.jsonl}/AMATH-lighteval_auto_clustered_result.jsonl"
-  cluster_summary: "${paths.jsonl}/AMATH-lighteval_cluster_summary.jsonl"
-  cluster_plot: "${paths.png}/AMATH-lighteval_cluster_distribution.png"
-  cluster_vis: "${paths.png}/AMATH-lighteval_visualization.png"
-  # 记忆频次文件 (由 pre.py 生成)
-  freq_file: "${paths.root}/AMATH_memory_freq.jsonl"
-  # 优化后的记忆库
-  optimized_memory: "${paths.root}/AMATH-lighteval_optimized_memory_k50.jsonl"
-  # 结果缓存目录
+  root: "/root/workspace/jychen/ex"
+  jsonl: "${paths.root}/outputs/jsonl"
+  png: "${paths.root}/outputs/png"
+  # 中间产物路径配置保持不变...
+  cluster_output: "${paths.jsonl}/{defaults.experiment}_clustered_result.jsonl"
+  cluster_summary: "${paths.jsonl}/{defaults.experiment}_cluster_summary.jsonl"
+  cluster_plot: "${paths.png}/{defaults.experiment}_cluster_distribution.png"
+  cluster_vis: "${paths.png}/{defaults.experiment}_visualization.png"
+  freq_file: "${paths.root}/{defaults.experiment}_memory_freq.jsonl"
+  optimized_memory: "${paths.root}/{defaults.experiment}_optimized_memory_topk.jsonl"
   rag_cache_dir: "${paths.root}/rag_result_cache"
 
 # ================= 模型配置 =================
 model:
-  source: "sglang" # 选项: "huggingface", "gemini", "sglang"
-  
-  # HuggingFace 配置
+  source: "sglang" 
+  optimize: "sglang"
   hf_name: "Qwen/Qwen3-4B-Instruct-2507"
   device: "cuda"
   batch_size: 20
   max_input_len: 4096
-  max_new_tokens: 1024
+  max_new_tokens: 2048
   
-  # Gemini 配置
   gemini_name: "gemini-2.5-flash"
-  # API KEY 建议通过环境变量设置: export GEMINI_API_KEY="xxx"
-
-  # SGlang 配置
   sglang_api_url: "http://127.0.0.1:30000/v1"
-  sglang_model_name: "Qwen/Qwen3-4B-Instruct-2507" # 需要和 SGLang 服务启动时的名字一致  
-  # Embedding 模型 (用于聚类和优化)
+  sglang_model_name: "Qwen/Qwen3-4B-Instruct-2507"
   embedding_name: "BAAI/bge-large-en-v1.5"
 
-# ================= 任务配置 =================
-
-# 1. 聚类 (Cluster) 参数
+# ================= 聚类配置 (相对稳定) =================
 cluster:
-  method: "agglomerative" # "agglomerative" or "kmeans"
+  method: "agglomerative"
   distance_threshold: 1.0
   kmeans_n_clusters: 10
-  vis_method: "tsne" # "tsne", "pca", "umap"
+  vis_method: "tsne"
   enable_pca_preprocess: True
   pca_preprocess_dims: 50
   tsne_perplexity: 40
-
-# 2. 预处理与评估 (Pre & Eval) 参数
-experiment:
-  mode: "rag" # "baseline", "rag", "all"
-  dataset_name: "DigitalLearningGmbH/MATH-lighteval"
-  dataset_config: "algebra"
-  start_index: 500
-  debug_num: 200 # 设置为 null 跑全量，数字用于调试
-  visualize_memory: True
-  #字段映射配置
-  field_map:
-    question: "problem"   # 数据集中代表“问题”的列名
-    answer: "solution"    # 数据集中代表“答案”的列名  
-  # FlashRAG 检索参数
-  retrieval_topk: 3
-  retrieval_method: "bm25"
-
-  custom_test_file: "${paths.root}/AMATH-lighteval_wrong_questions.jsonl"
-
-  prompts:
-      rag_system: |
-        You are a math expert. You can solve math problems in one second to give the correct answer. Below are some similar solved problems. Refer to the logic in these examples to solve the new question.
-
-        Solve the problem in a very brief. Don't answer more than 80 tokens. If the problem is easy, You can also just give the final answer. Do not perform unit conversion.
-        Try to use fractions instead of decimals.
-        ⚠️ IMPORTANT: You MUST put the final answer within \boxed{{}}. For example: \boxed{{10}} or \boxed{{x \in [-1,1]}}.
-
-        {reference}
-
-        ### Question:
-        {question}
-
-        ### Answer:
-        Let's think step by step.
-
-
-eval_compare:
-  # 模式: "original" (只测原始), "optimized" (只测优化), "both" (对比测试)
-  mode: "both"
-  wrong_num: null # 设置为 null 跑全量，数字用于调试
-  # 错题集路径 (默认读取 wrong_filter.py 生成的文件)
-  wrong_file: "${paths.root}/AMATH-lighteval_wrong_questions.jsonl"
-  
-  # [原始记忆] 配置
-  original:
-    # 原始语料路径 (通常由 pre.py 生成)
-    corpus_path: "${paths.root}/MATH-lighteval_corpus.jsonl"
-    index_path: "${paths.root}/MATH-lighteval_bm25_index"
-  # [优化后记忆] 配置
-  optimized:
-    # 优化后记忆文件 (optimizer.py 生成)
-    memory_file: "${paths.optimized_memory}"
-    # 转换后的临时语料路径
-    corpus_path: "${paths.root}/AMATH-lighteval_optimized_corpus.jsonl"
-    index_path: "${paths.root}/AMATH-lighteval_optimized_bm25_index"
-
-# 3. 优化器 (Optimizer) 参数
-optimizer:
-  top_k_high: 30         # 高频 Anchor 数量
-  bottom_k_low: 30       # 低频 候选数量
-  low_freq_threshold: 1  # 只有 freq < 1 且被合并时才删除
-  top_n_similar: 5       # 类内合并 Top-N
-  llm_batch_size: 8      # 批量扩写大小
-  # 🔥优化器专用的 Prompts
-  prompts:
-    summarize_high_freq: |
-      你是数学助教。下面是一组属于同一题型的记忆条目，它们都来自同一个聚类（同类问题）。
-      请将它们合并成**一条更完整、更抽象的记忆**，要求：
-
-      1. 不改变任何结论，也不要引入新的数值或额外事实。
-      2. 保留所有关键条件、公式与解题结论。
-      3. 适当总结共同的解题思路，可以合并重复信息。
-      4. 用English写成一段或两段连续文本，不要分条列出原题号。
-      ⚠️ IMPORTANT: You MUST put the final answer within \boxed{{}}. For example: \boxed{{10}} or \boxed{{x+1}}.
-      待合并的记忆条目如下：
-      {items_formatted}
-
-    expand_low_freq: |
-      你是数学助教。下面是一条数学题目的记忆内容。
-
-      请在 **不改变题目条件和答案、不添加任何新数值或事实** 的前提下，对它进行语义扩写：
-      1. 可以增加对题目考察点的解释和背景说明。
-      2. 可以加入同义改写、更多自然语言表述，以便未来更容易被检索到。
-      3. 输出一段或两段English文本，不要丢失原始信息。
-      ⚠️ IMPORTANT: You MUST put the final answer within \boxed{{}}. For example: \boxed{{10}} or \boxed{{x+1}}.
-      原始记忆：
-      {text}
-
-# 🔥 新增: 错题本配置
-wrong_set:
-  # 你想从哪些日志里提取错题？(支持列表)
-  input_logs: 
-    - "${paths.root}/MATH-lighteval_sglang_rag_20251220_082725.txt"
-    - "${paths.root}/eval_MATH-lighteval_sglang_rag_20251220_090242.txt"
-  
-  # 源测试集 (用来根据ID查原始题目内容)
-  # 注意：这里默认指向 pre.py 生成的标准测试集
-  source_test_file: "${paths.root}/MATH-lighteval_test_data.jsonl" 
-  
-  # 输出的错题集文件
-  output_file: "${paths.root}/AMATH-lighteval_wrong_questions.jsonl"

@@ -102,36 +102,103 @@ class SGLangGenerator:
 # ==========================================
 
 def extract_math_answer(text):
+    """
+    (升级版) 从模型输出中提取答案
+    逻辑与 _local_extract 保持一致：
+    1. 优先找 \boxed{}
+    2. 兜底找最后一行
+    3. 清洗 '=' 和 '\approx' 以及 LaTeX 杂质
+    """
     if not text: return None
-    text = str(text)
+    text = str(text).strip()
+    
+    # 1. 优先提取 \boxed{} 内容
     idx = text.rfind("\\boxed{")
     if idx != -1:
         content_start = idx + 7 
         balance = 0
         for i in range(content_start, len(text)):
-            char = text[i]
-            if char == '{':
-                balance += 1
-            elif char == '}':
-                if balance == 0:
-                    return text[content_start:i]
+            if text[i] == '{': balance += 1
+            elif text[i] == '}':
+                if balance == 0: return text[content_start:i] 
                 balance -= 1
     
+    # 2. 兜底策略：取最后一行并清洗
     lines = text.strip().split('\n')
     if lines:
         last_line = lines[-1].strip()
+        if last_line.endswith('.'): last_line = last_line[:-1]
+        
+        # 清洗 LaTeX 符号
+        last_line = last_line.replace('$', '').replace('`', '')
+        
+        # 去掉 "The Answer is" 前缀
         last_line = re.sub(r'^(The )?Answer( is)?:?', '', last_line, flags=re.IGNORECASE).strip()
-        if len(last_line) < 50: 
-            return last_line
+        
+        # 处理等式 (取等号右边)
+        if '=' in last_line: last_line = last_line.split('=')[-1].strip()
+        
+        # 处理近似符号
+        if '\\approx' in last_line: last_line = last_line.split('\\approx')[-1].strip()
+        
+        # 长度放宽到 100 (原版是 50)
+        if len(last_line) < 100: return last_line
+        
     return None
 
 def normalize_latex(s):
+    """
+    (升级版) 标准化 LaTeX 字符串
+    逻辑与 _local_norm 保持一致：
+    1. 移除 left/right/mathrm 等修饰符
+    2. 统一分号、百分号
+    3. 再次处理可能残留的 '=' 或 '\in'
+    """
     if not s: return ""
-    s = str(s)
+    # 基础清洗
+    s = str(s).replace('$', '').replace('`', '').replace('\\%', '%')
+    s = s.replace("\\dfrac", "\\frac").replace("\\text", "")
+    
+    # 移除修饰符 (这是关键差异，防止 \left( \right) 导致误判)
+    s = s.replace("\\left", "").replace("\\right", "").replace("\\mathrm", "")
+    
+    # 去除空白
     s = "".join(s.split())
-    s = s.replace("\\dfrac", "\\frac")
-    s = s.replace("\\text", "")
-    return s.strip()
+    
+    # 再次确保取等号右边 (双重保险)
+    if '=' in s: s = s.split('=')[-1]
+    if '\\in' in s: s = s.split('\\in')[-1]
+    
+    return s.rstrip('.').strip()
+
+def _get_field(item, attr: str, key: str = None, default=None):
+    """兼容 FlashRAG Dataset 对象 & dict"""
+    if hasattr(item, attr):
+        return getattr(item, attr)
+    if isinstance(item, dict):
+        return item.get(key or attr, default)
+    return default
+
+def judge_math_item(item):
+    """
+    返回: (is_right, gold_val, pred_val)
+    gold_val/pred_val 是“提取后的原始答案”（未 norm），方便日志/调试。
+    """
+    pred = _get_field(item, "pred")
+    golden_answers = _get_field(item, "golden_answers")
+    gold_raw = golden_answers[0] if isinstance(golden_answers, (list, tuple)) and golden_answers else golden_answers
+
+    gold_val = extract_math_answer(gold_raw)
+    if gold_val is None:
+        gold_val = str(gold_raw).strip() if gold_raw is not None else None
+
+    pred_val = extract_math_answer(pred)
+
+    if not gold_val or not pred_val:
+        return False, gold_val, pred_val
+
+    is_right = normalize_latex(gold_val) == normalize_latex(pred_val)
+    return is_right, gold_val, pred_val
 
 def evaluate_results(results, experiment_name, result_log_file):
     correct = 0
@@ -151,17 +218,8 @@ def evaluate_results(results, experiment_name, result_log_file):
             gold_raw = item.golden_answers[0] if hasattr(item, 'golden_answers') else item['golden_answers'][0]
             question = item.question if hasattr(item, 'question') else item['question']
 
-            gold_val = extract_math_answer(gold_raw)
-            if gold_val is None: gold_val = str(gold_raw).strip()
-
-            pred_val = extract_math_answer(pred)
-            is_right = False
-            
-            if gold_val and pred_val:
-                norm_gold = normalize_latex(gold_val)
-                norm_pred = normalize_latex(pred_val)
-                if norm_gold == norm_pred:
-                    is_right = True
+            # 使用升级后的提取逻辑
+            is_right, gold_val, pred_val = judge_math_item(item)
 
             if is_right: correct += 1
 
@@ -192,16 +250,22 @@ def evaluate_results(results, experiment_name, result_log_file):
 
 def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
     """
-    修改版：
-    1. 将优化后的记忆库 (optimized_memory) 转换为 FlashRAG corpus 格式
-    2. 提取测试集
+    准备数据：
+    1. 检查 corpus_file (优化后的记忆库) 是否存在 (必须存在！)
+    2. 生成 test.jsonl (测试集)
     """
+    # 🔥 修改 1: 严格检查记忆库是否存在，不存在则报错，绝不自己生成
+    if not os.path.exists(corpus_file):
+        print(f"❌ 严重错误: 找不到优化后的记忆库文件: {corpus_file}")
+        print("   请先运行 optimizer.py 生成该文件！")
+        return False
+    else:
+        print(f"✅ [Memory] 检测到优化后的记忆库: {corpus_file}")
+
     dataset_name = cfg.experiment.dataset_name
     dataset_config = cfg.experiment.dataset_config
-    # 🔥 核心修改：读取优化后的记忆文件路径
-    memory_source_file = cfg.paths.optimized_memory 
-
-    print(f"📥 [Step 1] 正在加载测试数据集: {dataset_name}...")
+    
+    print(f"📥 [Test] 正在加载数据集以构建测试集: {dataset_name}...")
     try:
         if dataset_config:
             dataset = load_dataset(dataset_name, dataset_config)
@@ -214,66 +278,49 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
     q_col = cfg.experiment.field_map.question
     a_col = cfg.experiment.field_map.answer
     split_test = "test"
-
-    # --- A. 适配记忆库: Optimized Memory -> Corpus ---
-    # 🔥 核心修改：不再读取 train 集，而是读取 memory_source_file
-    print(f"🔨 [Memory] 正在转换优化后的记忆库: {memory_source_file} -> {corpus_file}")
     
-    if not os.path.exists(memory_source_file):
-        print(f"❌ 错误: 找不到优化后的记忆文件: {memory_source_file}")
-        print("   请确保 config.yaml 中的 paths.optimized_memory 路径正确且文件存在。")
-        return False
-
-    # 强制重新转换，确保使用的是最新的优化记忆
-    with open(memory_source_file, "r", encoding="utf-8") as fin, open(corpus_file, "w", encoding="utf-8") as fout:       
-        count = 0
-        for line in tqdm(fin, desc="Converting Memory"):
-            try:
-                item = json.loads(line)
-                # 优先使用 optimizer 生成的 question 字段 (可能是聚合/扩写过的)，如果没有则回退到 contents
-                content_val = item.get("question") or item.get("contents", "")
-                
-                # 构造 FlashRAG 标准格式
-                new_item = {
-                    "id": str(item.get("id")),
-                    "contents": content_val
-                }
-                fout.write(json.dumps(new_item) + "\n")
-                count += 1
-            except json.JSONDecodeError:
-                continue
-    print(f"✅ 记忆库转换完成，共处理 {count} 条记忆。")
-
-    # --- B. 准备测试集 (Test) ---
-    debug_num = cfg.experiment.debug_num
-    print(f"🔨 [Test] 正在提取测试集 (样本数: {debug_num if debug_num else 'ALL'})...")
-    
+    print(f"🔨 [Test] 正在处理测试集...")
     with open(test_file, "w", encoding="utf-8") as f:
+        # ... (这里保留原有的测试集切片逻辑，不用动) ...
+        # (即原代码中 "if split_test not in dataset:" 开始到 "f.write..." 结束的部分)
+        # 为了节省篇幅，这里略过中间未修改的切片逻辑，请保留你原代码中 202-208 行的逻辑
         if split_test not in dataset:
              print(f"❌ 错误: 数据集没有 {split_test} 划分！")
              return False
              
         test_data = dataset[split_test]
+        start_idx = int(cfg.experiment.get("start_index", 0) or 0)
+        debug_num = cfg.experiment.get("debug_num")
+        total_len = len(test_data)
+        print(f'\n debug_num是{debug_num}\n')
         if debug_num:
-            limit = min(int(debug_num), len(test_data))
-            test_data = test_data.select(range(limit))
-            
+            limit = int(debug_num)
+            end_idx = min(start_idx + limit, total_len)
+            print(f'\n debug_num是{debug_num}\n')
+            print(f'\n end_idx是{end_idx}\n')
+        else:
+            end_idx = total_len
+
+        if start_idx >= total_len:
+            test_data = test_data.select([])
+        else:
+            indices = range(start_idx, end_idx)
+            test_data = test_data.select(indices)
+
         for i, item in enumerate(test_data):
             q_text = item.get(q_col, "")
-            raw_ans = item.get(a_col, "") 
-            
+            raw_ans = item.get(a_col, "")
+            real_id = start_idx + i
             f.write(json.dumps({
-                "id": str(i),
+                "id": str(real_id),
                 "question": q_text,
-                "golden_answers": [str(raw_ans)] 
+                "golden_answers": [str(raw_ans)]
             }) + "\n")
+            
     return True
 
 def build_index(corpus_file: str, index_dir: str):
     """构建 BM25 索引"""
-    if os.path.exists(index_dir) and os.path.exists(os.path.join(index_dir, "vocab.tokenizer.json")):
-        print(f"✅ [Index] 索引已存在: {index_dir}，跳过构建。")
-        return
 
     print(f"🔨 [Index] 正在为 {corpus_file} 构建 BM25 索引...")
     corpus_texts = []
@@ -297,15 +344,20 @@ def build_index(corpus_file: str, index_dir: str):
     print("✅ 索引构建完成！")
 
 def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_image_file: str):
-    """记忆热度统计与导出"""
+    """
+    记忆热度/效用统计与导出 (强化学习版)
+    逻辑：
+    - 检索命中 & 题目做对: freq += 2 (奖励)
+    - 检索命中 & 题目做错: freq -= 2 (惩罚)
+    """
     # 这里的 freq_file 从 config 中读取
-    freq_file = cfg.paths.freq_file
+    freq_file = cfg.paths.eval_freq_file
     
-    print("\n🔍 [Analysis] 正在进行全量记忆热度统计...")
+    print("\n🔍 [Analysis] 正在进行全量记忆效用评分 (RL Scoring)...")
     
     all_memory_ids = set()
     id_to_content = {} 
-
+    print(corpus_file)
     try:
         with open(corpus_file, "r", encoding="utf-8") as f:
             for line in f:
@@ -313,78 +365,127 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
                 mid = str(item['id'])
                 all_memory_ids.add(mid)
                 id_to_content[mid] = item.get("contents", "")
+    
     except Exception as e:
         print(f"⚠️ 无法读取记忆库文件 {corpus_file}，错误: {e}")
+    # # ======== 【jychen】 查看记忆库里的第一条 ========
+    # if id_to_content:
+    #     first_mid = next(iter(id_to_content))
+    #     print(f"\n👀 [DEBUG] 记忆库首条内容检查 (ID: {first_mid}):")
+    #     print(f"{id_to_content[first_mid]}")
+    #     print("-" * 50)
+    # # ==================================================
+
+    # 初始化分数，默认 0
+    # 注意：这里我们用 score 代替原来的单纯计数，但变量名在输出时依然叫 freq 以兼容后续脚本
+    memory_scores = {mid: 0 for mid in all_memory_ids}
     
-    memory_counter = collections.Counter({mid: 0 for mid in all_memory_ids})
-    
-    # 统计命中
-    for item in rag_results:
+    # 统计命中并打分
+    total_questions = len(rag_results)
+    correct_count = 0
+
+    for item in tqdm(rag_results, desc="Scoring Memories"):
+        is_correct, _, _ = judge_math_item(item)
+        if is_correct:
+            correct_count += 1
+
+        scoreget = cfg.experiment.reward
+        scoreloss = cfg.experiment.punishment
+        reward = scoreget if is_correct else scoreloss
+
         retrieved_docs = getattr(item, 'retrieval_result', [])
+        # # ======== 【jychen】 查看当前题目检索到的第一条 ========
+        # if retrieved_docs:
+        #     first_doc = retrieved_docs[0]
+        #     # 兼容字典或对象读取 ID
+        #     f_id = str(first_doc.get('id')) if isinstance(first_doc, dict) else str(getattr(first_doc, 'id', ''))
+            
+        #     print(f"\n👀 [DEBUG] 当前题目检索到的 Top1 记忆 (ID: {f_id}):")
+        #     # 从之前加载的 id_to_content 中查内容
+        #     content = id_to_content.get(f_id, "⚠️ 内容未在 corpus 文件中找到")
+        #     print(content)
+        #     print("-" * 50)
+        # # =======================================================
         for doc in retrieved_docs:
-            if isinstance(doc, dict):
-                doc_id = str(doc.get('id'))
-            else:
-                doc_id = str(getattr(doc, 'id', None))
-            if doc_id:
-                memory_counter[doc_id] += 1
+            doc_id = str(doc.get('id')) if isinstance(doc, dict) else str(getattr(doc, 'id', None))
+            if doc_id and doc_id in memory_scores:
+                memory_scores[doc_id] += reward
 
-    # 排序
-    sorted_memories = sorted(memory_counter.items(), key=lambda x: (-x[1], x[0]))
+    # 排序 (按分数从高到低)
+    sorted_memories = sorted(memory_scores.items(), key=lambda x: (-x[1], x[0]))
     
-    total = len(sorted_memories)
-    used = sum(1 for _, v in sorted_memories if v > 0)
-    print(f"📊 记忆库总量: {total} | 激活: {used} | 未激活: {total - used}")
+    # 统计信息
+    total_mem = len(sorted_memories)
+    positive_mem = sum(1 for _, v in sorted_memories if v > 0)
+    negative_mem = sum(1 for _, v in sorted_memories if v < 0)
+    zero_mem = sum(1 for _, v in sorted_memories if v == 0)
+    
+    print(f"📊 记忆库评分统计:")
+    print(f"   - 总量: {total_mem}")
+    print(f"   - 正分(贡献者): {positive_mem} ({(positive_mem/total_mem)*100:.1f}%)")
+    print(f"   - 负分(干扰项): {negative_mem} ({(negative_mem/total_mem)*100:.1f}%)")
+    print(f"   - 零分(冷门): {zero_mem}")
+    print(f"   - 当前题目正确率: {correct_count/total_questions*100:.2f}%")
 
-    # 导出 jsonl (使用 config 中定义的路径)
+    # 导出 jsonl (保持 freq 字段名，但存的是分数)
     try:
-        print(f"💾 [Save] 正在导出记忆调用频次排序结果到: {freq_file}")
-        # 确保目录存在
+        print(f"💾 [Save] 正在导出记忆评分结果到: {freq_file}")
         os.makedirs(os.path.dirname(freq_file), exist_ok=True)
         
         with open(freq_file, "w", encoding="utf-8") as f:
-            for rank, (mid, freq) in enumerate(sorted_memories, start=1):
+            for rank, (mid, score) in enumerate(sorted_memories, start=1):
                 record = {
                     "rank": rank,
                     "memory_id": mid,
-                    "freq": int(freq),
+                    "freq": int(score), # 🔥 这里存的是分数 (-2, 0, 2, 4...)
                     "contents": id_to_content.get(mid, "")
                 }
+                # print(record["contents"]) #jychen
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        print("✅ 调用频次 jsonl 导出完成！")
+        print("✅ 评分文件导出完成！")
     except Exception as e:
         print(f"❌ 导出失败: {e}")
 
-    # 可视化 (如果 config 开启)
+    # 可视化 (分数分布图)
     if cfg.experiment.visualize_memory:
-        print(f"🎨 [Visual] 正在生成频次分布图: {vis_image_file}")
+        print(f"🎨 [Visual] 正在生成分数分布图: {vis_image_file}")
         try:
             ids = [m[0] for m in sorted_memories]
-            counts = [m[1] for m in sorted_memories]
+            scores = [m[1] for m in sorted_memories]
             
             display_limit = 30
             if len(ids) > display_limit * 2:
                 plot_ids = ids[:display_limit] + ["..."] + ids[-display_limit:]
-                plot_counts = counts[:display_limit] + [0] + counts[-display_limit:]
-                colors = ['skyblue'] * display_limit + ['white'] + ['salmon'] * display_limit
-                edge_colors = ['navy'] * display_limit + ['white'] + ['darkred'] * display_limit
+                plot_scores = scores[:display_limit] + [0] + scores[-display_limit:]
+                # 颜色区分：正分蓝，负分红，零分白
+                colors = []
+                for s in plot_scores:
+                    if s > 0: colors.append('skyblue')
+                    elif s < 0: colors.append('salmon')
+                    else: colors.append('lightgrey')
             else:
                 plot_ids = ids
-                plot_counts = counts
-                colors = 'skyblue'
-                edge_colors = 'navy'
+                plot_scores = scores
+                colors = ['skyblue' if s > 0 else 'salmon' if s < 0 else 'lightgrey' for s in plot_scores]
 
             plt.figure(figsize=(15, 6))
-            bars = plt.bar(plot_ids, plot_counts, color=colors, edgecolor=edge_colors)
-            plt.title(f'Memory Usage Distribution', fontsize=14)
+            # 画一条 0 分线
+            plt.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+            
+            bars = plt.bar(plot_ids, plot_scores, color=colors, edgecolor='navy')
+            plt.title(f'Memory Utility Score (Correct=+2, Wrong=-2)', fontsize=14)
+            plt.ylabel('Score')
             plt.xticks(rotation=90, fontsize=8) 
             
             # 显示数值
             for i, bar in enumerate(bars):
                 height = bar.get_height()
                 if plot_ids[i] != "...": 
-                    plt.text(bar.get_x() + bar.get_width()/2., height, f'{int(height)}',
-                             ha='center', va='bottom', fontsize=8)
+                    # 正分显示在条上方，负分显示在条下方
+                    y_pos = height if height >= 0 else height - (max(scores)*0.05)
+                    va = 'bottom' if height >= 0 else 'top'
+                    plt.text(bar.get_x() + bar.get_width()/2., y_pos, f'{int(height)}',
+                             ha='center', va=va, fontsize=8)
             
             plt.tight_layout()
             plt.savefig(vis_image_file, dpi=300)
@@ -392,9 +493,10 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
         except ImportError:
             print("❌ 缺少 matplotlib")
     else:
-        print("\n🏆 [Top 10 Hot Memories]")
-        for mid, count in sorted_memories[:10]:
-            print(f"   ID: {mid:<5} | Count: {count}")
+        print("\n🏆 [Top 10 High-Utility Memories]")
+        for mid, score in sorted_memories[:10]:
+            print(f"   ID: {mid:<5} | Score: {score}")
+
 
 # ==========================================
 # 4. 主程序 (Hydra Managed)
@@ -412,7 +514,7 @@ def main(cfg: DictConfig):
     
     # 定义中间文件路径
     # 🔥 修改这里：文件名加上 _optimized，与 eval.py 逻辑保持一致
-    corpus_file = os.path.join(root_dir, f"{dataset_tag}_optimized_corpus.jsonl")
+    corpus_file = cfg.paths.optimized_memory
     test_file = os.path.join(root_dir, f"{dataset_tag}_test_data.jsonl")
     index_dir = os.path.join(root_dir, f"{dataset_tag}_optimized_bm25_index")
     
@@ -562,7 +664,7 @@ def main(cfg: DictConfig):
         return prompt
 
     # --- Task A: Baseline ---
-    if cfg.experiment.mode in ['baseline', 'all']:
+    if cfg.experiment.mode in ['baseline']:
         print("\n⚔️ [Task A] 正在运行 Baseline ...")
         
         baseline_inputs = []

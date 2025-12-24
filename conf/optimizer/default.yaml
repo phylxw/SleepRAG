@@ -1,0 +1,28 @@
+# conf/optimizer/default.yaml
+
+top_k_high: 50
+bottom_k_low: 30
+low_freq_threshold: 1
+top_n_similar: 5
+llm_batch_size: 8
+prompts:
+    expand_low_freq: |
+      You are an expert Math Olympiad Coach.
+      [Goal]:
+      this memory can't help our model to solve problems, transform it into a high-quality problem-solving guide.
+      the memory is :
+      {text}
+      There are some high-quality memories from similar problems:
+      {good_examples}
+      Don't write too much and you'd better keep the key word of this question.
+      ⚠️ Output Format:
+      Question: ...
+      Answer: ...
+
+    xxxxx:
+      You are a xxxx
+      Please comnine the following items
+      MEMORY1_BEGIN
+      {memory_1}
+      MEMORY1_END
+      ...

@@ -77,8 +77,17 @@ class GeminiGenerator:
 
 # 🔥 必须使用修复后的判题函数
 def extract_math_answer(text):
+    """
+    (升级版) 从模型输出中提取答案
+    逻辑与 _local_extract 保持一致：
+    1. 优先找 \boxed{}
+    2. 兜底找最后一行
+    3. 清洗 '=' 和 '\approx' 以及 LaTeX 杂质
+    """
     if not text: return None
     text = str(text).strip()
+    
+    # 1. 优先提取 \boxed{} 内容
     idx = text.rfind("\\boxed{")
     if idx != -1:
         content_start = idx + 7 
@@ -89,50 +98,114 @@ def extract_math_answer(text):
                 if balance == 0: return text[content_start:i] 
                 balance -= 1
     
+    # 2. 兜底策略：取最后一行并清洗
     lines = text.strip().split('\n')
     if lines:
         last_line = lines[-1].strip()
         if last_line.endswith('.'): last_line = last_line[:-1]
+        
+        # 清洗 LaTeX 符号
         last_line = last_line.replace('$', '').replace('`', '')
+        
+        # 去掉 "The Answer is" 前缀
         last_line = re.sub(r'^(The )?Answer( is)?:?', '', last_line, flags=re.IGNORECASE).strip()
+        
+        # 处理等式 (取等号右边)
         if '=' in last_line: last_line = last_line.split('=')[-1].strip()
+        
+        # 处理近似符号
         if '\\approx' in last_line: last_line = last_line.split('\\approx')[-1].strip()
+        
+        # 长度放宽到 100 (原版是 50)
         if len(last_line) < 100: return last_line
+        
     return None
 
 def normalize_latex(s):
+    """
+    (升级版) 标准化 LaTeX 字符串
+    逻辑与 _local_norm 保持一致：
+    1. 移除 left/right/mathrm 等修饰符
+    2. 统一分号、百分号
+    3. 再次处理可能残留的 '=' 或 '\in'
+    """
     if not s: return ""
+    # 基础清洗
     s = str(s).replace('$', '').replace('`', '').replace('\\%', '%')
     s = s.replace("\\dfrac", "\\frac").replace("\\text", "")
+    
+    # 移除修饰符 (这是关键差异，防止 \left( \right) 导致误判)
     s = s.replace("\\left", "").replace("\\right", "").replace("\\mathrm", "")
+    
+    # 去除空白
     s = "".join(s.split())
+    
+    # 再次确保取等号右边 (双重保险)
     if '=' in s: s = s.split('=')[-1]
     if '\\in' in s: s = s.split('\\in')[-1]
+    
     return s.rstrip('.').strip()
 
-def evaluate_results(results):
+def evaluate_results(results, result_log_file,experiment_name = "对比测试"):
     correct = 0
     total = len(results)
-    for item in results:
-        pred = item.pred if hasattr(item, 'pred') else item['pred']
-        gold = item.golden_answers[0] if hasattr(item, 'golden_answers') else item['golden_answers'][0]
+    
+    # 确保目录存在
+    os.makedirs(os.path.dirname(result_log_file), exist_ok=True)
+
+    with open(result_log_file, "a", encoding="utf-8") as f:
+        header = f"\n{'='*20} {experiment_name} {'='*20}\n"
+        print(header.strip())
+        f.write(header)
         
-        gold_val = extract_math_answer(gold) or str(gold).strip()
-        pred_val = extract_math_answer(pred)
-        
-        if gold_val and pred_val:
-            if normalize_latex(gold_val) == normalize_latex(pred_val):
-                correct += 1
-    return (correct / total * 100) if total > 0 else 0
+        for i, item in enumerate(results):
+            # 兼容 FlashRAG Dataset 对象和 dict
+            pred = item.pred if hasattr(item, 'pred') else item['pred']
+            gold_raw = item.golden_answers[0] if hasattr(item, 'golden_answers') else item['golden_answers'][0]
+            question = item.question if hasattr(item, 'question') else item['question']
+
+            # 使用升级后的提取逻辑
+            gold_val = extract_math_answer(gold_raw)
+            if gold_val is None: gold_val = str(gold_raw).strip()
+
+            pred_val = extract_math_answer(pred)
+            is_right = False
+            
+            # 使用升级后的归一化逻辑进行比对
+            if gold_val and pred_val:
+                norm_gold = normalize_latex(gold_val)
+                norm_pred = normalize_latex(pred_val)
+                if norm_gold == norm_pred:
+                    is_right = True
+
+            if is_right: correct += 1
+
+            log_entry = (
+                f"\n[ID]: {i}\n"
+                f"[Question]: {str(question)[:100]}...\n"
+                f"[Gold Raw]: ... => [Extracted]: {gold_val}\n"
+                f"[Pred Raw]: ...{str(pred)[-50:].replace(chr(10), ' ')} => [Extracted]: {pred_val}\n"
+                f"[Result]: {'✅ Correct' if is_right else '❌ Wrong'}\n"
+                f"{'-'*30}\n"
+            )
+            f.write(log_entry)
+            if i < 5: print(log_entry.strip()) # 减少一点控制台输出
+
+        acc = correct / total * 100
+        summary = (
+            f"\n📊 统计 ({experiment_name}):\n"
+            f"Total: {total}, Correct: {correct}, Accuracy: {acc:.2f}%\n"
+            f"{'='*50}\n"
+        )
+        print(summary)
+        f.write(summary)
+    return acc
 
 # ==========================================
 # 2. 辅助数据处理函数
 # ==========================================
 
 def build_index_if_needed(corpus_path, index_path):
-    if os.path.exists(index_path) and os.path.exists(os.path.join(index_path, "vocab.tokenizer.json")):
-        print(f"✅ 索引已存在: {index_path}")
-        return
     print(f"🔨 正在构建索引: {corpus_path} -> {index_path}")
     
     texts = []
@@ -175,10 +248,24 @@ def run_rag_task(task_name, cfg, generator, corpus_path, index_path, test_file):
     # 1. 确保索引存在
     build_index_if_needed(corpus_path, index_path)
     
+    # ================= 🔥 核心修改开始 =================
+    # 目的：为每个任务创建一个独立的缓存子目录，防止结果覆写
+    # 例如: .../rag_result_cache/原始记忆_Original
+    
+    # 清洗一下 task_name，去掉空格和括号，做成合法的文件夹名
+    safe_name = task_name.replace(" ", "_").replace("(", "").replace(")", "")
+    
+    # 拼接新的保存路径
+    task_save_dir = os.path.join(cfg.paths.rag_cache_dir, safe_name)
+            
+    # ================= 🔥 核心修改结束 =================
+
     # 2. 构造 Config
     rag_update = {
         "data_dir": cfg.paths.root,
-        "save_dir": cfg.paths.rag_cache_dir,
+        # 👇 这里改成了新的子目录 task_save_dir
+        "save_dir": task_save_dir, 
+        
         "retrieval_method": cfg.experiment.retrieval_method,
         "corpus_path": corpus_path,
         "index_path": index_path,
@@ -197,11 +284,18 @@ def run_rag_task(task_name, cfg, generator, corpus_path, index_path, test_file):
     
     # 4. 加载错题集
     dataset = Dataset(rag_config, test_file)
-    
+    root_dir = cfg.paths.root
+    dataset_tag = cfg.experiment.dataset_name.split('/')[-1]
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    result_log_file = os.path.join(root_dir, f"eval_{dataset_tag}_{cfg.model.source}_{cfg.experiment.mode}_{timestamp}.txt")
     # 5. 运行
     results = pipeline.run(dataset)
-    acc = evaluate_results(results)
+    acc = evaluate_results(results,result_log_file)
     print(f"📊 {task_name} 正确率: {acc:.2f}%")
+    
+    # 顺便告诉你结果存在哪了
+    print(f"💾 结果已保存至: {os.path.join(task_save_dir, 'intermediate_data.json')}")
+    
     return acc
 
 # ==========================================
@@ -221,7 +315,7 @@ def main(cfg: DictConfig):
         return
 
     # --- 🔥 新增: Debug 切片逻辑 ---
-    wrong_num = cfg.experiment.get("wrong_num")
+    wrong_num = cfg.eval_compare.get("wrong_num")
     if wrong_num:
         try:
             limit = int(wrong_num)

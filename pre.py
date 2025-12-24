@@ -101,37 +101,109 @@ class SGLangGenerator:
 # 2. 评估工具 (Math Logic)
 # ==========================================
 
+import os
+import re
+import json
+
 def extract_math_answer(text):
+    """
+    (升级版) 从模型输出中提取答案
+    逻辑与 _local_extract 保持一致：
+    1. 优先找 \boxed{}
+    2. 兜底找最后一行
+    3. 清洗 '=' 和 '\approx' 以及 LaTeX 杂质
+    """
     if not text: return None
-    text = str(text)
+    text = str(text).strip()
+    
+    # 1. 优先提取 \boxed{} 内容
     idx = text.rfind("\\boxed{")
     if idx != -1:
         content_start = idx + 7 
         balance = 0
         for i in range(content_start, len(text)):
-            char = text[i]
-            if char == '{':
-                balance += 1
-            elif char == '}':
-                if balance == 0:
-                    return text[content_start:i]
+            if text[i] == '{': balance += 1
+            elif text[i] == '}':
+                if balance == 0: return text[content_start:i] 
                 balance -= 1
     
+    # 2. 兜底策略：取最后一行并清洗
     lines = text.strip().split('\n')
     if lines:
         last_line = lines[-1].strip()
+        if last_line.endswith('.'): last_line = last_line[:-1]
+        
+        # 清洗 LaTeX 符号
+        last_line = last_line.replace('$', '').replace('`', '')
+        
+        # 去掉 "The Answer is" 前缀
         last_line = re.sub(r'^(The )?Answer( is)?:?', '', last_line, flags=re.IGNORECASE).strip()
-        if len(last_line) < 50: 
-            return last_line
+        
+        # 处理等式 (取等号右边)
+        if '=' in last_line: last_line = last_line.split('=')[-1].strip()
+        
+        # 处理近似符号
+        if '\\approx' in last_line: last_line = last_line.split('\\approx')[-1].strip()
+        
+        # 长度放宽到 100 (原版是 50)
+        if len(last_line) < 100: return last_line
+        
     return None
 
 def normalize_latex(s):
+    """
+    (升级版) 标准化 LaTeX 字符串
+    逻辑与 _local_norm 保持一致：
+    1. 移除 left/right/mathrm 等修饰符
+    2. 统一分号、百分号
+    3. 再次处理可能残留的 '=' 或 '\in'
+    """
     if not s: return ""
-    s = str(s)
+    # 基础清洗
+    s = str(s).replace('$', '').replace('`', '').replace('\\%', '%')
+    s = s.replace("\\dfrac", "\\frac").replace("\\text", "")
+    
+    # 移除修饰符 (这是关键差异，防止 \left( \right) 导致误判)
+    s = s.replace("\\left", "").replace("\\right", "").replace("\\mathrm", "")
+    
+    # 去除空白
     s = "".join(s.split())
-    s = s.replace("\\dfrac", "\\frac")
-    s = s.replace("\\text", "")
-    return s.strip()
+    
+    # 再次确保取等号右边 (双重保险)
+    if '=' in s: s = s.split('=')[-1]
+    if '\\in' in s: s = s.split('\\in')[-1]
+    
+    return s.rstrip('.').strip()
+
+def _get_field(item, attr: str, key: str = None, default=None):
+    """兼容 FlashRAG Dataset 对象 & dict"""
+    if hasattr(item, attr):
+        return getattr(item, attr)
+    if isinstance(item, dict):
+        return item.get(key or attr, default)
+    return default
+
+def judge_math_item(item):
+    """
+    返回: (is_right, gold_val, pred_val)
+    gold_val/pred_val 是“提取后的原始答案”（未 norm），方便日志/调试。
+    """
+    pred = _get_field(item, "pred")
+    golden_answers = _get_field(item, "golden_answers")
+    gold_raw = golden_answers[0] if isinstance(golden_answers, (list, tuple)) and golden_answers else golden_answers
+
+    gold_val = extract_math_answer(gold_raw)
+    if gold_val is None:
+        gold_val = str(gold_raw).strip() if gold_raw is not None else None
+
+    pred_val = extract_math_answer(pred)
+
+    if not gold_val or not pred_val:
+        return False, gold_val, pred_val
+
+    is_right = normalize_latex(gold_val) == normalize_latex(pred_val)
+    return is_right, gold_val, pred_val
+
 
 def evaluate_results(results, experiment_name, result_log_file):
     correct = 0
@@ -151,18 +223,8 @@ def evaluate_results(results, experiment_name, result_log_file):
             gold_raw = item.golden_answers[0] if hasattr(item, 'golden_answers') else item['golden_answers'][0]
             question = item.question if hasattr(item, 'question') else item['question']
 
-            gold_val = extract_math_answer(gold_raw)
-            if gold_val is None: gold_val = str(gold_raw).strip()
-
-            pred_val = extract_math_answer(pred)
-            is_right = False
-            
-            if gold_val and pred_val:
-                norm_gold = normalize_latex(gold_val)
-                norm_pred = normalize_latex(pred_val)
-                if norm_gold == norm_pred:
-                    is_right = True
-
+            # 使用升级后的提取逻辑
+            is_right, gold_val, pred_val = judge_math_item(item)
             if is_right: correct += 1
 
             log_entry = (
@@ -290,9 +352,6 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
 
 def build_index(corpus_file: str, index_dir: str):
     """构建 BM25 索引"""
-    if os.path.exists(index_dir) and os.path.exists(os.path.join(index_dir, "vocab.tokenizer.json")):
-        print(f"✅ [Index] 索引已存在: {index_dir}，跳过构建。")
-        return
 
     print(f"🔨 [Index] 正在为 {corpus_file} 构建 BM25 索引...")
     corpus_texts = []
@@ -320,60 +379,14 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
     记忆热度/效用统计与导出 (强化学习版)
     逻辑：
     - 检索命中 & 题目做对: freq += 2 (奖励)
-    - 检索命中 & 题目做错: freq -= 2 (惩罚)
+    - 检索命中 & 题目做错: freq -= 1 (惩罚)
     """
     # 这里的 freq_file 从 config 中读取
     freq_file = cfg.paths.freq_file
     
     print("\n🔍 [Analysis] 正在进行全量记忆效用评分 (RL Scoring)...")
     
-    # ================= 判题辅助函数 (内嵌，确保独立运行) =================
-    def _local_extract(text):
-        if not text: return None
-        text = str(text).strip()
-        idx = text.rfind("\\boxed{")
-        if idx != -1:
-            content_start = idx + 7 
-            balance = 0
-            for i in range(content_start, len(text)):
-                if text[i] == '{': balance += 1
-                elif text[i] == '}':
-                    if balance == 0: return text[content_start:i] 
-                    balance -= 1
-        lines = text.strip().split('\n')
-        if lines:
-            last_line = lines[-1].strip()
-            if last_line.endswith('.'): last_line = last_line[:-1]
-            last_line = last_line.replace('$', '').replace('`', '')
-            last_line = re.sub(r'^(The )?Answer( is)?:?', '', last_line, flags=re.IGNORECASE).strip()
-            if '=' in last_line: last_line = last_line.split('=')[-1].strip()
-            if '\\approx' in last_line: last_line = last_line.split('\\approx')[-1].strip()
-            if len(last_line) < 100: return last_line
-        return None
-
-    def _local_norm(s):
-        if not s: return ""
-        s = str(s).replace('$', '').replace('`', '').replace('\\%', '%')
-        s = s.replace("\\dfrac", "\\frac").replace("\\text", "")
-        s = s.replace("\\left", "").replace("\\right", "").replace("\\mathrm", "")
-        s = "".join(s.split())
-        if '=' in s: s = s.split('=')[-1]
-        if '\\in' in s: s = s.split('\\in')[-1]
-        return s.rstrip('.').strip()
-
-    def _check_correct(item):
-        """判断单条结果是否正确"""
-        pred = item.pred if hasattr(item, 'pred') else item.get('pred')
-        gold = item.golden_answers[0] if hasattr(item, 'golden_answers') else item.get('golden_answers')[0]
-        
-        gold_val = _local_extract(gold) or str(gold).strip()
-        pred_val = _local_extract(pred)
-        
-        if gold_val and pred_val:
-            if _local_norm(gold_val) == _local_norm(pred_val):
-                return True
-        return False
-    # ===============================================================
+    
 
     all_memory_ids = set()
     id_to_content = {} 
@@ -397,23 +410,20 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
     correct_count = 0
 
     for item in tqdm(rag_results, desc="Scoring Memories"):
-        # 1. 判定当前题目是否做对
-        is_correct = _check_correct(item)
-        if is_correct: correct_count += 1
-        
-        # 2. 决定 奖励/惩罚 分数
-        reward = 2 if is_correct else -2
-        
-        # 3. 找到检索到的记忆，进行加减分
+        is_correct, _, _ = judge_math_item(item)
+        if is_correct:
+            correct_count += 1
+
+        scoreget = cfg.experiment.reward
+        scoreloss = cfg.experiment.punishment
+        reward = scoreget if is_correct else scoreloss
+
         retrieved_docs = getattr(item, 'retrieval_result', [])
         for doc in retrieved_docs:
-            if isinstance(doc, dict):
-                doc_id = str(doc.get('id'))
-            else:
-                doc_id = str(getattr(doc, 'id', None))
-            
+            doc_id = str(doc.get('id')) if isinstance(doc, dict) else str(getattr(doc, 'id', None))
             if doc_id and doc_id in memory_scores:
                 memory_scores[doc_id] += reward
+
 
     # 排序 (按分数从高到低)
     sorted_memories = sorted(memory_scores.items(), key=lambda x: (-x[1], x[0]))
@@ -429,6 +439,8 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
     print(f"   - 正分(贡献者): {positive_mem} ({(positive_mem/total_mem)*100:.1f}%)")
     print(f"   - 负分(干扰项): {negative_mem} ({(negative_mem/total_mem)*100:.1f}%)")
     print(f"   - 零分(冷门): {zero_mem}")
+    print(correct_count)
+    print(total_questions)
     print(f"   - 当前题目正确率: {correct_count/total_questions*100:.2f}%")
 
     # 导出 jsonl (保持 freq 字段名，但存的是分数)
