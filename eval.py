@@ -289,7 +289,7 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
              return False
              
         test_data = dataset[split_test]
-        start_idx = int(cfg.experiment.get("start_index", 0) or 0)
+        start_idx = int(cfg.model.get("start_index", 0) or 0)
         debug_num = cfg.experiment.get("debug_num")
         total_len = len(test_data)
         print(f'\n debug_num是{debug_num}\n')

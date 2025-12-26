@@ -1,6 +1,6 @@
 # conf/experiment/math_to_hmmt.yaml
 # 用途: 使用 MATH 构建记忆库，去测试 HMMT 数据集
-
+tag: "hmmt"
 mode: "baseline" # all, baseline, rag
 
 # 1. 记忆库配置 (Corpus)
@@ -13,8 +13,6 @@ test_dataset_name: "MathArena/hmmt_feb_2025"
 test_dataset_config: null
 test_split: "train"
 
-start_index: 0
-debug_num: 10 
 visualize_memory: True
 
 # 字段映射 (两个数据集都兼容 problem/solution)

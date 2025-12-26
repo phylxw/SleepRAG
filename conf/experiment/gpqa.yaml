@@ -1,6 +1,6 @@
 # conf/experiment/gpqa.yaml
 # 用途: 使用记忆库 (默认还是 MATH) 去测试 GPQA 科学选择题
-
+tag: "gpqa"
 mode: "all" # 可选: baseline, rag
 
 # ==========================================
@@ -18,8 +18,6 @@ test_dataset_name: "Idavidrein/gpqa"
 test_dataset_config: "gpqa_diamond" # 选项: gpqa_diamond (推荐), gpqa_main, gpqa_extended
 test_split: "train" # GPQA 只有 train split 用于 few-shot/eval
 
-start_index: 0
-debug_num: 20 # 调试时设小一点
 visualize_memory: True
 
 # ==========================================
@@ -58,22 +56,23 @@ prompts:
     Let's think step by step.
       
   rag_system: |
-    Solve the following multiple-choice question.Solve the following question in a brief.Don't generate overly long reasoning paths.
+    Solve the following multiple-choice question.Solve the following question in a brief.Don't generate overly long reasoning paths.Before ask you,I will provide you with some questions with answers for reference first.
 
     Reference:
     {reference}
 
-    ### Question:
-    {question}
+
+    Example Format:
+    If the answer is option (A), output: \boxed{{A}}
 
     ### Instruction:
     1. Derive the answer step-by-step.
     2. Compare your result with options (A) (B) (C) (D).
     3. ⚠️ IMPORTANT: Output ONLY the option letter inside the box.
     4. ⛔ DO NOT output the calculated number.
-
-    Example Format:
-    If the answer is option (A), output: \boxed{{A}}
+    
+    ### Question:
+    {question}
 
     ### Answer:
     Let's think step by step.

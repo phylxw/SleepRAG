@@ -5,6 +5,7 @@ import json
 from tqdm import tqdm
 from tools.evaluate import judge_math_item
 import matplotlib.pyplot as plt
+from tools.score.bemr import _calculate_bemr_final_score
 
 def _load_memory_corpus(corpus_file: str):
     """辅助函数：读取记忆库文件"""
@@ -22,26 +23,43 @@ def _load_memory_corpus(corpus_file: str):
     return all_memory_ids, id_to_content
 
 def _calculate_scores(rag_results, all_memory_ids, cfg: DictConfig):
-    """辅助函数：计算记忆项的 Reward/Punishment 分数"""
-    memory_scores = {mid: 0 for mid in all_memory_ids}
+    """
+    修改版：基于 BEMR (Bayesian-EM Memory Refinement) 计算记忆分数
+    [cite: 1040]
+    """
+    # 1. 初始化统计量：alpha(正例), beta(负例)
+    # 论文建议初始化为 1 (Prior)，避免冷启动时的除零错误 
+    memory_stats = {mid: {'alpha': 1.0, 'beta': 1.0} for mid in all_memory_ids}
     correct_count = 0
     
-    scoreget = cfg.experiment.reward
-    scoreloss = cfg.experiment.punishment
-
-    for item in tqdm(rag_results, desc="Scoring Memories"):
+    # 2. 遍历结果更新 Alpha/Beta (E-Step 的数据收集部分)
+    for item in tqdm(rag_results, desc="Scoring Memories (BEMR)"):
         # 假设 judge_math_item 在外部作用域可用
         is_correct, _, _ = judge_math_item(item)
         if is_correct:
             correct_count += 1
 
-        reward = scoreget if is_correct else scoreloss
-
         retrieved_docs = getattr(item, 'retrieval_result', [])
+        
         for doc in retrieved_docs:
             doc_id = str(doc.get('id')) if isinstance(doc, dict) else str(getattr(doc, 'id', None))
-            if doc_id and doc_id in memory_scores:
-                memory_scores[doc_id] += reward
+            
+            # 只要 doc_id 存在于我们的库中，就进行贝叶斯更新
+            if doc_id and doc_id in memory_stats:
+                if is_correct:
+                    # 答对：增加 alpha 
+                    # 如果你想保留 cfg.experiment.reward 的权重控制，可以乘在 1 上，但标准 BEMR 是计数
+                    memory_stats[doc_id]['alpha'] += 1.0 
+                else:
+                    # 答错：增加 beta
+                    memory_stats[doc_id]['beta'] += 1.0
+
+    # 3. 计算最终 BEMR 分数 (M-Step 准备阶段)
+    memory_scores = {}
+    for mid, stats in memory_stats.items():
+        # 调用辅助函数计算混合分数
+        score = _calculate_bemr_final_score(stats['alpha'], stats['beta'], cfg)
+        memory_scores[mid] = score
     
     return memory_scores, correct_count
 

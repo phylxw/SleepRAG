@@ -1,6 +1,6 @@
 # conf/experiment/math_self.yaml
 # 用途: 使用 MATH 构建记忆库，去测试 HMMT 数据集
-
+tag: "math"
 mode: "all" # all, baseline, rag
 
 # 1. 记忆库配置 (Corpus)
@@ -13,8 +13,6 @@ test_dataset_name: "DigitalLearningGmbH/MATH-lighteval"
 test_dataset_config: "algebra"
 test_split: "test"
 
-start_index: 0
-debug_num: 50 
 visualize_memory: True
 
 # 字段映射 (两个数据集都兼容 problem/solution)

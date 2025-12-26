@@ -12,14 +12,19 @@ paths:
   jsonl: "${paths.root}/outputs/jsonl"
   png: "${paths.root}/outputs/png"
   # 中间产物路径配置保持不变...
-  cluster_output: "${paths.jsonl}/{defaults.experiment}_clustered_result.jsonl"
-  cluster_summary: "${paths.jsonl}/{defaults.experiment}_cluster_summary.jsonl"
-  cluster_plot: "${paths.png}/{defaults.experiment}_cluster_distribution.png"
-  cluster_vis: "${paths.png}/{defaults.experiment}_visualization.png"
-  freq_file: "${paths.root}/{defaults.experiment}_memory_freq.jsonl"
-  optimized_memory: "${paths.root}/{defaults.experiment}_optimized_memory_topk.jsonl"
+  cluster_output: "${paths.jsonl}/${experiment.tag}_clustered_result.jsonl"
+  cluster_summary: "${paths.jsonl}/${experiment.tag}_cluster_summary.jsonl"
+  cluster_plot: "${paths.png}/${experiment.tag}_cluster_distribution.png"
+  cluster_vis: "${paths.png}/${experiment.tag}_visualization.png"
+  freq_file: "${paths.root}/${experiment.tag}_memory_freq.jsonl"
+  freq_after_file: "${paths.root}/${experiment.tag}_memory_freq.jsonl"
+  optimized_memory: "${paths.root}/${experiment.tag}_optimized_memory_topk.jsonl"
   rag_cache_dir: "${paths.root}/rag_result_cache"
 
+# ================= 数学常数 =================
+parameters:
+  bemr_lambda1: 1.0  # 历史效用权重
+  bemr_lambda2: 0.5  # 探索/不确定性权重 (调大此值可保护低频记忆)
 # ================= 模型配置 =================
 model:
   source: "sglang" 
@@ -29,6 +34,9 @@ model:
   batch_size: 20
   max_input_len: 4096
   max_new_tokens: 2048
+  start_index: 0
+  debug_num: 10 # 调试时设小一点
+
   
   gemini_name: "gemini-2.5-flash"
   sglang_api_url: "http://127.0.0.1:30000/v1"

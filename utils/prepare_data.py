@@ -90,8 +90,8 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
 
     # --- 切片与写入 ---
     with open(test_file, "w", encoding="utf-8") as f:
-        start_idx = int(cfg.experiment.get("start_index", 0) or 0)
-        debug_num = cfg.experiment.get("debug_num")
+        start_idx = int(cfg.model.get("start_index", 0) or 0)
+        debug_num = cfg.model.get("debug_num")
         
         total_len = len(ds_test)
         if debug_num:

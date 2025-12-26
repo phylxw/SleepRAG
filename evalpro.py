@@ -46,7 +46,7 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
     - 检索命中 & 题目做对: freq += 2 (奖励)
     - 检索命中 & 题目做错: freq -= 1 (惩罚)
     """
-    freq_file = cfg.paths.freq_file
+    freq_file = cfg.paths.freq_after_file
     print("\n🔍 [Analysis] 正在进行全量记忆效用评分 (RL Scoring)...")
 
     # 1. 加载数据
@@ -317,7 +317,7 @@ def main(cfg: DictConfig):
     if cfg.experiment.mode == 'all':
         summary = (
             f"\n{'='*20} 最终对比结果 {'='*20}\n"
-            f"📊 数据集: {cfg.experiment.dataset_name}\n"
+            f"📊 数据集: {cfg.experiment.test_dataset_name}\n"
             f"🤖 模型: {model_source}\n"
             f"📉 Baseline: {acc_baseline:.2f}%\n"
             f"📈 FlashRAG: {acc_rag:.2f}%\n"

@@ -61,7 +61,16 @@ def evaluate_results(results, experiment_name, result_log_file):
             # 日志记录：记录解析前后的对比 [cite: 19, 20]
             log_entry = (
                 f"\n[ID]: {i}\n"
-                f"[Question]: {str(question)[:100]}...\n"
+                f"[Question]: {str(question)}...\n"
+                f"[Gold Parsed]: {gold_val}\n"
+                f"[Pred Parsed]: {pred_val}\n"
+                f"[Pred All]: {pred_raw}\n"
+                f"[Result]: {'✅ Correct' if is_right else '❌ Wrong'}\n"
+                f"{'-'*30}\n"
+            )
+            log_print = (
+                f"\n[ID]: {i}\n"
+                f"[Question]: {str(question)}...\n"
                 f"[Gold Parsed]: {gold_val}\n"
                 f"[Pred Parsed]: {pred_val}\n"
                 f"[Result]: {'✅ Correct' if is_right else '❌ Wrong'}\n"
@@ -71,7 +80,7 @@ def evaluate_results(results, experiment_name, result_log_file):
             
             # 控制台只打印前 5 条预览 [cite: 20]
             if i < 5: 
-                print(log_entry.strip())
+                print(log_print.strip())
 
         # 统计最终准确率 [cite: 21]
         acc = correct / total * 100 if total > 0 else 0
