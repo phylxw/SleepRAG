@@ -19,10 +19,48 @@ prompts:
       Question: ...
       Answer: ...
 
-    xxxxx:
+    xxxxx: |
       You are a xxxx
       Please comnine the following items
       MEMORY1_BEGIN
       {memory_1}
       MEMORY1_END
       ...
+      
+    textgrad_correction: |
+      You are optimizing a memory entry for a RAG system.
+      
+      [Original Memory]
+      {content}
+      
+      [Critique / Gradient]
+      This memory was INCORRECTLY retrieved for the following queries:
+      {neg_text}
+      
+      [Positive Guidance]
+      Successful neighboring memories:
+      {good_examples}
+      
+      [Task]
+      Rewrite the memory content to be more SPECIFIC and avoid the errors above.
+      Output ONLY the rewritten content.
+
+    apply_gradient: |
+      You are a Knowledge Editor for a RAG system.
+      Your task is to rewrite the memory based on the Expert's critique.
+
+      [Original Memory]
+      {content}
+
+      [Expert's Critique]
+      {gradient}
+      {momentum_part}
+
+      [Constraints]
+      1. **NO Meta-data**: Do NOT include fields like "Domain:", "Problem Type:", "Reasoning Path:", "Cluster:", "Note:", etc.
+      2. **NO Fluff**: Do NOT write introductions like "This memory helps with..." or "Here is the rewritten memory".
+      3. **Direct Content**: Start directly with the core knowledge (Formulas, Theorems, Key Steps, or Python Code).
+      4. **Latex Format**: Use standard latex for math.
+
+      [Goal]
+      Produce a clean, dense, and "ready-to-retrieve" knowledge snippet.

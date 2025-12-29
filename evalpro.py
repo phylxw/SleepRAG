@@ -1,17 +1,8 @@
 import os
 import json
-import re
 import time
 import torch
-import bm25s
-import logging
-import ast
-import collections
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-from datasets import load_dataset
 from huggingface_hub import snapshot_download
-
 # Hydra & OmegaConf
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -33,42 +24,56 @@ from utils.prepare_data import prepare_data
 from utils.build_index import build_index
 from utils.generator.gemini import GeminiGenerator
 from utils.generator.sglang import SGLangGenerator
-from tools.evaluate import judge_math_item,evaluate_results
-
+from tools.evaluate import evaluate_results
+from tools.retrieverwrapper import BEMRRetrieverWrapper
 # ==========================================
 # 2. 核心功能函数 (Hydra 适配)
 # ==========================================
 from tools.memoryscore import _load_memory_corpus,_calculate_scores,_print_stats_and_save,_visualize_results
-def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_image_file: str):
+def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_image_file: str, 
+                         old_stats: dict = None, root_dir: str = None, corpus_tag: str = None):
     """
-    记忆热度/效用统计与导出 (强化学习版) - 主入口
-    逻辑：
-    - 检索命中 & 题目做对: freq += 2 (奖励)
-    - 检索命中 & 题目做错: freq -= 1 (惩罚)
+    记忆热度/效用统计与导出 - 主入口
+    [新增参数]:
+    - old_stats: 传入历史状态，实现持续学习
+    - root_dir, corpus_tag: 用于构造 stats 文件的保存路径
     """
-    freq_file = cfg.paths.freq_after_file
-    print("\n🔍 [Analysis] 正在进行全量记忆效用评分 (RL Scoring)...")
+    # 依然保留旧的 freq_file 用于兼容旧的可视化逻辑，但核心是下面的 stats_file
+    freq_after_file = cfg.paths.freq_after_file
+    print("\n🔍 [Analysis] 正在更新贝叶斯信念状态 (Bayesian Belief Update)...")
 
     # 1. 加载数据
     all_memory_ids, id_to_content = _load_memory_corpus(corpus_file)
 
-    # 2. 计算分数
-    memory_scores, correct_count = _calculate_scores(rag_results, all_memory_ids, cfg)
+    # 2. 计算分数 (传入 old_stats)
+    # 注意：这里接收了 new_stats (完整的字典)
+    memory_scores, new_stats, correct_count = _calculate_scores(rag_results, all_memory_ids, cfg, old_stats)
 
-    # 3. 打印统计并保存文件 (需要返回排序后的列表供可视化使用)
+    # 3. 🔥 [BEMR 核心] 保存完整的记忆状态 (Stats + Gradients)
+    if root_dir and corpus_tag:
+        stats_after_file = cfg.paths.stats_after_file
+        try:
+            with open(stats_after_file, 'w', encoding='utf-8') as f:
+                json.dump(new_stats, f, ensure_ascii=False, indent=2)
+            print(f"💾 [BEMR] 已保存最新的记忆状态 (含 TextGrad 梯度) 至: {stats_after_file}")
+        except Exception as e:
+            print(f"⚠️ 保存记忆状态失败: {e}")
+
+    # 4. 打印统计并保存简易分数文件 (兼容旧逻辑)
+    # memory_scores 是标量分数，可以直接传给旧函数
     sorted_memories = _print_stats_and_save(
         memory_scores, 
         id_to_content, 
         len(rag_results), 
         correct_count, 
-        freq_file
+        freq_after_file
     )
 
-    # 4. 可视化或打印 Top 10
+    # 5. 可视化
     _visualize_results(cfg, sorted_memories, vis_image_file)
 
 # ==========================================
-# 4. 主程序 (Hydra Managed)
+# 3. 主程序 (Hydra Managed)
 # ==========================================
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -76,7 +81,6 @@ def main(cfg: DictConfig):
     
     # 0. 基础设置与路径构造
     print("Visible GPU count:", torch.cuda.device_count())
-    
     root_dir = cfg.paths.root
     
     # =================================================================
@@ -109,20 +113,20 @@ def main(cfg: DictConfig):
     # 结果日志 -> 最好同时体现 "用什么库测什么题"
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     # 格式: HMMT_on_MATH_sglang_rag_2025...
-    result_log_file = os.path.join(root_dir, f"{test_tag}_on_{corpus_tag}_{cfg.model.source}_{cfg.experiment.mode}_{timestamp}.txt")
-    
+    result_log_file = os.path.join(root_dir, f"{test_tag}_on_{corpus_tag}_{cfg.model.source}_{cfg.parameters.mode}_{timestamp}.txt")
+
     # 可视化图片 -> 跟随日志名
     vis_image_file = os.path.join(root_dir, f"{test_tag}_on_{corpus_tag}_dist_{timestamp}.png")
 
     if os.path.exists(result_log_file): os.remove(result_log_file)
     print(f"📝 结果将保存至: {result_log_file}")
-    print(f"🛠️ 模式: {cfg.experiment.mode} | 源: {cfg.model.source} | 数据集: {cfg.experiment.test_dataset_name}")
+    print(f"🛠️ 模式: {cfg.parameters.mode} | 源: {cfg.model.source} | 数据集: {cfg.experiment.test_dataset_name}")
 
     # 1. 数据准备
     if not prepare_data(cfg, corpus_file, test_file): return
     
     # 2. 索引构建 (如果是 rag 或 all 模式)
-    if cfg.experiment.mode in ['rag', 'all']:
+    if cfg.parameters.mode in ['rag', 'all']:
         build_index(corpus_file, index_dir)
     
     # 3. 初始化 Generator
@@ -239,6 +243,15 @@ def main(cfg: DictConfig):
         print(f"❌ 未支持的 MODEL_SOURCE: {model_source}")
         return
 
+    stats_optimized_file = cfg.paths.stats_optimized_file
+    memory_stats = {}
+    if os.path.exists(stats_optimized_file):
+        print(f"📈 [BEMR] 加载历史记忆状态: {stats_optimized_file}")
+        with open(stats_optimized_file, 'r', encoding='utf-8') as f:
+            memory_stats = json.load(f)
+    else:
+        print(f"⚠️ [BEMR] 未找到历史状态，将从零开始评估。")
+
     # 读取测试数据
     with open(test_file, "r") as f:
         test_dataset_raw = [json.loads(line) for line in f]
@@ -256,7 +269,7 @@ def main(cfg: DictConfig):
         return prompt
 
     # --- Task A: Baseline ---
-    if cfg.experiment.mode in ['baseline', 'all']:
+    if cfg.parameters.mode in ['baseline']:
         print("\n⚔️ [Task A] 正在运行 Baseline ...")
         
         baseline_inputs = []
@@ -277,7 +290,7 @@ def main(cfg: DictConfig):
         acc_baseline = evaluate_results(baseline_results, "Baseline (No RAG)", result_log_file)
 
     # --- Task B: FlashRAG ---
-    if cfg.experiment.mode in ['rag', 'all']:
+    if cfg.parameters.mode in ['rag', 'all']:
         print("\n⚔️ [Task B] 正在运行 FlashRAG (Few-shot Retrieval)...")
         
         # 准备 RAG 配置
@@ -290,7 +303,7 @@ def main(cfg: DictConfig):
             "corpus_path": corpus_file,
             "index_path": index_dir,
             "retriever_model_path": index_dir,
-            "topk": cfg.experiment.retrieval_topk,
+            "topk": cfg.parameters.retrieval_topk,
             # Generator 配置继承之前的
             "device": cfg.model.device,
             "generator_model_path": config['generator_model_path'] if 'generator_model_path' in config else "gpt2"
@@ -299,7 +312,10 @@ def main(cfg: DictConfig):
         # 重新实例化 Config 以确保 Retriever 能读到正确参数
         rag_config = Config(config_dict=rag_update)
         retriever = get_retriever(rag_config)
-        
+        # 🔥 [关键] 评估时也必须启用 Wrapper，利用 BEMR 分数辅助检索
+        # 即使记忆被优化了，UCB 策略依然能帮助我们平衡探索
+        print("🔧 [BEMR] 启用贝叶斯 UCB 探索策略 (Evaluating)...")
+        retriever = BEMRRetrieverWrapper(retriever, memory_stats, cfg)
         rag_system_part = cfg.experiment.prompts.rag_system
         
         prompt_tpl = PromptTemplate(rag_config, system_prompt=rag_system_part, user_prompt="")
@@ -311,10 +327,10 @@ def main(cfg: DictConfig):
         acc_rag = evaluate_results(rag_results, f"FlashRAG ({corpus_name} Optimized Memory)", result_log_file)
         
         # 统计记忆热度 (传入 cfg)
-        analyze_memory_usage(rag_results, cfg, corpus_file, vis_image_file)
+        analyze_memory_usage(rag_results, cfg, corpus_file, vis_image_file, old_stats=memory_stats,root_dir=root_dir,corpus_tag=corpus_tag)
 
     # --- Summary ---
-    if cfg.experiment.mode == 'all':
+    if cfg.parameters.mode == 'all':
         summary = (
             f"\n{'='*20} 最终对比结果 {'='*20}\n"
             f"📊 数据集: {cfg.experiment.test_dataset_name}\n"

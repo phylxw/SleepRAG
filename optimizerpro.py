@@ -8,284 +8,289 @@ from sentence_transformers import SentenceTransformer
 # Hydra
 import hydra
 from omegaconf import DictConfig
-from utils.toolfunction import clean_special_chars,has_cuda
-from tools.optimize.callllm import init_llm,call_llm,call_llm_batch
-from tools.optimize.memoryload import load_clustered_memories,load_cluster_summary,load_memory_freq
-# ================= 全局变量 (保持原逻辑) =================
+from utils.toolfunction import clean_special_chars, has_cuda
+from tools.optimize.callllm import init_llm, call_llm, call_llm_batch
+from tools.optimize.memoryload import load_clustered_memories, load_cluster_summary
+
+# ================= 全局变量 =================
 GLOBAL_MODEL = None
 GLOBAL_TOKENIZER = None
 GLOBAL_SGLANG_CLIENT = None
 
-# ===== 高频 & 低频记忆的 LLM 操作 =====
-def summarize_high_freq_prompt(group_texts: List[str], cfg: DictConfig) -> str:
-    items_formatted = "\n".join(
-        f"[{i+1}] {t}" for i, t in enumerate(group_texts)
-    )
-    template = cfg.optimizer.prompts.summarize_high_freq
-    prompt = template.format(items_formatted=items_formatted)
-    return prompt
+# ==========================================
+# 1. Prompt 构造函数
+# ==========================================
 
-def expand_low_freq_memory_prompt(text: str, good_examples: str, cfg: DictConfig) -> str:
-    """构造低频记忆扩写的 prompt"""
-    template = cfg.optimizer.prompts.expand_low_freq
-    prompt = template.format(text=text,good_examples = good_examples)
+def textgrad_correction_prompt(content: str, neg_queries: List[str], good_examples: str, cfg: DictConfig) -> str:
+    """
+    TextGrad 核心 Prompt：结合错误反馈(Gradient)和正向示例(Momentum)来修正记忆
+    """
+    # 取前 3 个错误 Query 作为梯度信号
+    neg_text = "\n".join([f"- {q}" for q in neg_queries[:3]])
     
+    # 尝试从 config 读取模板，如果没有则使用默认硬编码模板
+    default_template = """
+You are optimizing a memory entry for a Retrieval-Augmented Generation (RAG) system.
+
+[Original Memory]
+{content}
+
+[Critique / Gradient]
+This memory was INCORRECTLY retrieved for the following queries (it misled the system):
+{neg_text}
+
+[Positive Guidance / Momentum]
+Successful neighboring memories look like this (try to mimic their style/depth):
+{good_examples}
+
+[Task]
+Rewrite the memory content. 
+1. Make it SPECIFIC enough to avoid being retrieved for the incorrect queries above.
+2. Maintain its core utility but clarify ambiguities.
+3. If the memory contains factual errors, fix them based on common knowledge.
+
+Output ONLY the rewritten memory content.
+"""
+    # 安全获取模板
+    template = default_template
+    if hasattr(cfg.optimizer, "prompts") and "textgrad_correction" in cfg.optimizer.prompts:
+        template = cfg.optimizer.prompts.textgrad_correction
+    
+    prompt = template.format(content=content, neg_text=neg_text, good_examples=good_examples)
     return prompt
-
-
-# =============== Embedding & 相似度 ===============
-
-def build_embeddings_for_memories(memories: Dict[str, dict], model_name: str) -> Dict[str, np.ndarray]:
-    device = "cuda" if has_cuda() else "cpu"
-    print(f"🚀 正在计算记忆向量 ({model_name}) on {device}...")
-    model = SentenceTransformer(model_name, device=device)
-
-    ids = list(memories.keys())
-    texts = []
-    for mid in ids:
-        rec = memories[mid]
-        text = rec.get("contents", "")
-        texts.append(text)
-
-    embeddings = model.encode(
-        texts,
-        batch_size=32,
-        show_progress_bar=True,
-        normalize_embeddings=True
-    )
-    id_to_emb = {mid: embeddings[i] for i, mid in enumerate(ids)}
-    print(f"✅ 向量构建完成，共 {len(id_to_emb)} 条")
-    return id_to_emb
-
-
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    return float(np.dot(a, b))
-
-
-# =============== 高频/低频集合选择 ===============
-
-def select_high_low_ids(
-    freq_map: Dict[str, int],
-    top_k_high: int,
-    bottom_k_low: int,
-    low_freq_for_low_only: int = 1
-):
-    items = list(freq_map.items())
-    # 高频：按 freq 降序
-    sorted_desc = sorted(items, key=lambda x: -x[1])
-    high_ids = []
-    for mid, f in sorted_desc:
-        if f < 2: 
-            # 一旦分数掉到 2 以下，后面的都不看了，直接截断
-            break
-        high_ids.append(mid)
-        if len(high_ids) >= top_k_high:
-            break
-
-    # 低频：按 freq 升序
-    sorted_asc = sorted(items, key=lambda x: x[1])
-    bad_ids = []
-    for mid, f in sorted_asc:
-        if f <= -1:
-            bad_ids.append(mid)
-
-    print(f"🔥 高频 anchor 数量: {len(high_ids)}")
-    print(f"🧊 分数小于-1的记忆数量: {len(bad_ids)}（之后会修正）")
-    return set(high_ids), set(bad_ids)
 
 def summarize_experience_prompt(target_text: str, good_neighbors: List[str], cfg: DictConfig) -> str:
-    """构造利用高分邻居修正低分记忆的 Prompt"""
-    good_examples_text = "\n".join(
-        f"[{i+1}] {t}" for i, t in enumerate(good_neighbors)
-    )
+    """旧逻辑：利用高分邻居修正低分记忆 (Imitation)"""
+    good_examples_text = "\n".join(f"[{i+1}] {t}" for i, t in enumerate(good_neighbors))
     template = cfg.optimizer.prompts.expand_low_freq
     prompt = template.format(text=target_text, good_examples=good_examples_text)
     return prompt
 
-# =============== 主优化逻辑 (Hydra Managed) ===============
+def expand_low_freq_memory_prompt(text: str, good_examples: str, cfg: DictConfig) -> str:
+    """旧逻辑：自我扩写 (Fallback)"""
+    template = cfg.optimizer.prompts.expand_low_freq
+    prompt = template.format(text=text, good_examples=good_examples)
+    return prompt
+
+# ==========================================
+# 2. 筛选逻辑 (适配 BEMR Stats)
+# ==========================================
+
+def select_ids_from_stats(memory_stats: Dict[str, dict], cfg: DictConfig):
+    """
+    根据 BEMR Stats (Alpha/Beta) 筛选高分和低分记忆
+    """
+    # 计算胜率分数
+    scores = []
+    for mid, stats in memory_stats.items():
+        alpha = stats.get('alpha', 1.0)
+        beta = stats.get('beta', 1.0)
+        total = alpha + beta
+        # 计算胜率 (0.0 - 1.0)
+        win_rate = alpha / total if total > 0 else 0.5
+        scores.append((mid, win_rate, total))
+    
+    # 排序：按胜率降序，胜率相同按尝试次数降序
+    scores.sort(key=lambda x: (-x[1], -x[2]))
+    
+    # 筛选
+    top_k = cfg.optimizer.top_k_high
+    bottom_k = cfg.optimizer.bottom_k_low
+    
+    high_ids = [x[0] for x in scores[:top_k]]
+    
+    # 低分：只选那些尝试过且失败过的 (win_rate < 0.4 且 total > 2)
+    # 这种筛选能保证 TextGrad 有足够的“错误梯度”去优化
+    bad_ids = [x[0] for x in scores if x[1] < 0.4 and x[2] > 2]
+    
+    # 如果没选够，就硬凑最后几个垫底的
+    if len(bad_ids) < 10:
+         bad_ids = [x[0] for x in scores[-bottom_k:]]
+
+    print(f"🔥 高分 Anchor (用于指导): {len(high_ids)}")
+    print(f"🥶 低分 Candidates (需要修正): {len(bad_ids)}")
+    
+    return set(high_ids), set(bad_ids)
+
+# ==========================================
+# 3. 主优化逻辑 (Hydra Managed)
+# ==========================================
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def optimize_memory(cfg: DictConfig):
     # 0. 初始化 LLM
     init_llm(cfg)
 
-    # 1. 读入基础数据 (使用 config 中的路径)
+    # 1. 读入路径 (🔥 使用 yaml 中定义的静态路径)
+    # 你的 config.yaml 已经定义好了完整的路径，直接用即可
     cluster_file = cfg.paths.cluster_output
     summary_file = cfg.paths.cluster_summary
-    freq_file = cfg.paths.freq_file
-    output_file = cfg.paths.optimized_memory
+    stats_file = cfg.paths.stats_file       # 对应 ${experiment.tag}_memory_stats.json
+    output_file = cfg.paths.optimized_memory # 对应 ${experiment.tag}_optimized_memory_topk.jsonl
 
+    print(f"📂 [Input] 聚类结果: {cluster_file}")
+    print(f"📂 [Input] 统计状态: {stats_file}")
+    print(f"📂 [Output] 优化结果: {output_file}")
+
+    # 加载数据
+    if not os.path.exists(stats_file):
+        print(f"❌ 找不到状态文件: {stats_file}，无法进行 TextGrad 优化！")
+        return
+
+    # 加载聚类数据
     memories, id_order = load_clustered_memories(cluster_file)
     cluster_to_ids = load_cluster_summary(summary_file)
-    freq_map = load_memory_freq(freq_file)
+    
+    # 加载 BEMR 统计数据
+    with open(stats_file, 'r', encoding='utf-8') as f:
+        memory_stats = json.load(f)
 
     if not memories:
         print("❌ 无法加载记忆数据，程序退出。")
         return
 
-    # 为所有记忆补齐频次
-    for mid in memories.keys():
-        freq_map.setdefault(mid, 0)
+    # 2. 筛选集合 (高分做老师，低分做学生)
+    high_ids, bad_ids = select_ids_from_stats(memory_stats, cfg)
 
-    # 2. 选出高频、低频、0 频集合 (使用 config 中的参数)
-    high_ids, bad_ids = select_high_low_ids(
-        freq_map,
-        top_k_high=cfg.optimizer.top_k_high,
-        bottom_k_low=cfg.optimizer.bottom_k_low,
-        low_freq_for_low_only=cfg.optimizer.low_freq_threshold
-    )
-
-    # 3. 准备向量
-    id_to_emb = build_embeddings_for_memories(memories, cfg.model.embedding_name)
-
-    # 4. 高频：类内清理（Pruning）—— 仅删除低分邻居，不调用 LLM
-    print("\n========== 高频记忆优化阶段 (Pruning Only: Delete Low Score Neighbors) ==========")
-    to_delete_ids = set()
-
-    # 按照频次从高到低排序，优先处理高分 Anchor
-    high_ids_sorted = sorted(list(high_ids), key=lambda x: -freq_map.get(x, 0))
+    # =========================================================
+    # 4. 高频/高分优化 (Pruning: 优胜劣汰)
+    # =========================================================
+    print("\n========== 高分记忆清理阶段 (Pruning) ==========")
+    to_delete_ids = set() 
     
-    count_pruned = 0
-
-    for anchor_id in high_ids_sorted:
-        if anchor_id not in memories: continue
-        # 如果 Anchor 自己本身就在删除列表里（虽然逻辑上高分不应该在），跳过
-        if anchor_id in to_delete_ids: continue
-
-        rec_anchor = memories[anchor_id]
-        cluster_id = rec_anchor.get("cluster_id")
-        if cluster_id is None: continue
-        cluster_id = int(cluster_id)
+    # 按 Cluster 分组
+    cluster_groups = {}
+    for mid, rec in memories.items():
+        cid = rec.get("cluster_id")
+        if cid is not None:
+            cid = int(cid)
+            if cid not in cluster_groups: cluster_groups[cid] = []
+            cluster_groups[cid].append(mid)
+    
+    pruned_count = 0
+    
+    for cid, members in cluster_groups.items():
+        if len(members) < 2: continue # 独生子不删
         
-        # 获取同 Cluster 的所有成员
-        cluster_member_ids = [str(x) for x in cluster_to_ids.get(cluster_id, [])]
-        if not cluster_member_ids: continue
-
-        # 筛选出需要“清理”的邻居
-        # 条件：
-        # 1. 不是 Anchor 自己
-        # 2. 还没被标记删除
-        # 3. 分数 < 1 (根据你的要求：分数小于1的全部删掉)
-        victims = []
-        for mid in cluster_member_ids:
-            if mid == anchor_id: continue
-            if mid in to_delete_ids: continue
+        # 获取该 Cluster 内所有成员的 Stats
+        member_stats_list = []
+        for mid in members:
+            stats = memory_stats.get(mid, {'alpha': 1.0, 'beta': 1.0})
+            total = stats['alpha'] + stats['beta']
+            win_rate = stats['alpha'] / total if total > 0 else 0.5
+            member_stats_list.append({
+                'id': mid,
+                'win_rate': win_rate,
+                'total': total
+            })
             
-            # 获取该邻居的分数，默认为 0
-            score = freq_map.get(mid, 0)
-            
-            if score < 1:
-                victims.append(mid)
+        # 找出该 Cluster 的“最强王者” (Anchor)
+        member_stats_list.sort(key=lambda x: (-x['win_rate'], -x['total']))
+        best_mem = member_stats_list[0]
         
-        if not victims: continue
-
-        print(f"🔥 [Pruning] Anchor {anchor_id} (Score={freq_map[anchor_id]}) 所在 Cluster {cluster_id} 清理:")
-        print(f"   >>> 删除 {len(victims)} 个低分邻居 (Score < 1)")
+        # 条件 A: 有强力 Anchor (胜率 > 0.7 且验证过)
+        has_strong_anchor = (best_mem['win_rate'] > 0.7 and best_mem['total'] > 2)
         
-        # 执行删除标记
-        for mid in victims:
-            to_delete_ids.add(mid)
-            count_pruned += 1
-            # 只有少量删除时可以打印出来看看，太多就不打印了
-            if len(victims) <= 50:
-                print(f"       - 🗑️ Delete ID: {mid:<6} (Score: {freq_map.get(mid, 0)})")
+        if has_strong_anchor:
+            # 条件 B: 删除垃圾小弟
+            for mem in member_stats_list[1:]:
+                is_trash = False
+                # 情况 1: 确实烂 (<40% 且不是冷启动)
+                if mem['win_rate'] < 0.4 and mem['total'] > 2:
+                    is_trash = True
+                # 情况 2: 严重干扰 (Anchor > 90% 但小弟 < 50%)
+                if best_mem['win_rate'] > 0.9 and mem['win_rate'] < 0.5:
+                    is_trash = True
+                
+                if is_trash:
+                    to_delete_ids.add(mem['id'])
+                    pruned_count += 1
 
-    print(f"\n✨ 高频优化阶段结束，共清理了 {count_pruned} 条低分冗余记忆。")
-    # 注意：这里不再有 batch_prompts 或 call_llm_batch 的逻辑了
+    print(f"✨ Pruning 完成，共删除了 {pruned_count} 条劣质冗余记忆。")
 
-# 5. 低频/负分：利用类内高分“优等生”进行修正
-    print("\n========== 低频/负分记忆修正阶段 (Correct with Top-5 Neighbors) ==========")
-
-    # 筛选需要处理的低分记忆 (在 memories 中且未被删除)
-    low_expand_ids = [
-        mid for mid in bad_ids
-        if mid in memories and mid not in to_delete_ids
-    ]
-    print(f"🥶 需要修正的低频/负分记忆条目数: {len(low_expand_ids)}")
+    # =========================================================
+    # 5. TextGrad 核心修正阶段
+    # =========================================================
+    print("\n========== TextGrad 记忆修正阶段 (Gradient Descent) ==========")
+    
+    # 筛选需要处理的 ID (在 bad_ids 里且未被 Pruning 删除)
+    low_expand_ids = [mid for mid in bad_ids if mid in memories and mid not in to_delete_ids]
+    print(f"🎯 待优化目标数量: {len(low_expand_ids)}")
 
     batch_size = cfg.optimizer.llm_batch_size
     batch_prompts = []
-    batch_metadata = [] # 存元数据: (mid, 原文, 是否使用了邻居修正)
+    batch_metadata = [] 
 
     for mid in low_expand_ids:
         rec = memories[mid]
         base_text = rec.get("contents", "")
         cluster_id = rec.get("cluster_id")
         
-        # 1. 尝试寻找类内的高分“优等生”
+        # 获取 BEMR Stats
+        stats = memory_stats.get(mid, {})
+        neg_queries = stats.get('neg_queries', []) # 🔥 错误反馈 (Gradient)
+        
+        # 寻找“优等生” (Momentum)
         good_neighbors_text = []
         if cluster_id is not None:
             cluster_id = int(cluster_id)
             members = cluster_to_ids.get(cluster_id, [])
-            
-            # 筛选条件：Score >= 2 且不是自己
-            candidates = []
+            # 找同类里的高分 (Score > 0.8)
             for m_id in members:
                 m_id = str(m_id)
                 if m_id == mid: continue
-                if freq_map.get(m_id, 0) >= 2: # 🔥 核心条件：只学好的
-                    candidates.append(m_id)
-            
-            # 取 Top-5 (按分数降序)
-            candidates_sorted = sorted(candidates, key=lambda x: -freq_map.get(x, 0))
-            top_k_candidates = candidates_sorted[:5]
-            
-            # 获取文本
-            for m_id in top_k_candidates:
-                if m_id in memories:
+                s = memory_stats.get(m_id, {})
+                s_total = s.get('alpha', 0) + s.get('beta', 0)
+                if s_total > 0 and (s.get('alpha', 0)/s_total) > 0.8:
                     good_neighbors_text.append(memories[m_id].get("contents", ""))
-
-        # 2. 根据是否找到“优等生”构建 Prompt
-        if good_neighbors_text:
-            # Plan A: 有优等生带飞 -> 结合 Top-5 修正
-            prompt = summarize_experience_prompt(base_text, good_neighbors_text, cfg)
-            use_neighbors = True
-        else:
-            # Plan B: 整个聚类都只有它自己或都很烂 -> 只能自己自我反思/扩写 (兜底)
-            prompt = expand_low_freq_memory_prompt(base_text, good_examples = '' , cfg = cfg)
-            use_neighbors = False
             
-        batch_prompts.append(prompt)
-        batch_metadata.append({
-            "mid": mid,
-            "use_neighbors": use_neighbors,
-            "neighbor_count": len(good_neighbors_text)
-        })
+            # 取 Top 3
+            good_neighbors_text = good_neighbors_text[:3]
+        
+        good_examples_str = "\n".join([f"- {t}" for t in good_neighbors_text])
 
-        # 3. 凑够 Batch 执行
+        # 🔥 分支判断：优先 TextGrad
+        if len(neg_queries) > 0:
+            # Case A: TextGrad 修正 (最强)
+            prompt = textgrad_correction_prompt(base_text, neg_queries, good_examples_str, cfg)
+            opt_type = f"textgrad_with_{len(neg_queries)}_errors"
+        elif good_neighbors_text:
+            # Case B: 模仿优等生 (次选)
+            prompt = summarize_experience_prompt(base_text, good_neighbors_text, cfg)
+            opt_type = "neighbor_imitation"
+        else:
+            # Case C: 自我反思 (保底)
+            prompt = expand_low_freq_memory_prompt(base_text, "", cfg)
+            opt_type = "self_reflection"
+
+        batch_prompts.append(prompt)
+        batch_metadata.append({"mid": mid, "opt_type": opt_type})
+
+        # 执行 Batch
         if len(batch_prompts) >= batch_size:
-            print(f"🚀 [Batch Execution] 处理 {len(batch_prompts)} 条低分记忆...")
+            print(f"🚀 [Batch] 处理 {len(batch_prompts)} 条 (含 TextGrad)...")
             outputs = call_llm_batch(batch_prompts, cfg)
             
             for meta, output_text in zip(batch_metadata, outputs):
-                mid = meta['mid']
-                if not output_text:
-                    print(f"   ⚠️ LLM 返回为空，ID={mid} 保持不变")
-                    continue
-                
-                rec = memories[mid]
-                rec["contents"] = output_text
-                
-                if meta['use_neighbors']:
-                    rec["opt_type"] = f"corrected_by_{meta['neighbor_count']}_neighbors"
-                    # 可以在日志里标记一下
-                    # print(f"   ✅ ID {mid} 已利用 {meta['neighbor_count']} 个高分邻居修正")
-                else:
-                    rec["opt_type"] = "self_expanded_fallback"
-
+                if output_text and len(output_text) > 10:
+                    mid = meta['mid']
+                    memories[mid]["contents"] = output_text
+                    memories[mid]["opt_type"] = meta['opt_type']
+            
             batch_prompts = []
             batch_metadata = []
 
-    # 处理剩余的
+    # 处理剩余 Batch
     if batch_prompts:
-        print(f"🚀 [Batch Execution] 处理剩余 {len(batch_prompts)} 条低分记忆...")
+        print(f"🚀 [Batch] 处理剩余 {len(batch_prompts)} 条...")
         outputs = call_llm_batch(batch_prompts, cfg)
         for meta, output_text in zip(batch_metadata, outputs):
-            if not output_text: continue
-            rec = memories[meta['mid']]
-            rec["contents"] = output_text
-            rec["opt_type"] = f"corrected_by_{meta['neighbor_count']}_neighbors" if meta['use_neighbors'] else "self_expanded_fallback"
-    # 6. 写出新的记忆库
+            if output_text and len(output_text) > 10:
+                mid = meta['mid']
+                memories[mid]["contents"] = output_text
+                memories[mid]["opt_type"] = meta['opt_type']
+
+    # 6. 写出结果
     print("\n========== 写出优化后的记忆库 ==========")
     kept_count = 0
     with open(output_file, "w", encoding="utf-8") as f:
@@ -295,9 +300,8 @@ def optimize_memory(cfg: DictConfig):
             f.write(json.dumps(memories[mid], ensure_ascii=False) + "\n")
             kept_count += 1
 
-    print(f"✅ 新记忆库写入完成: {output_file}")
-    print(f"   保留记忆条目: {kept_count}")
-    print(f"   删除记忆条目: {len(to_delete_ids)}")
+    print(f"✅ 完成！优化后记忆库: {output_file}")
+    print(f"   保留: {kept_count} | 删除: {len(to_delete_ids)}")
 
 if __name__ == "__main__":
     optimize_memory()

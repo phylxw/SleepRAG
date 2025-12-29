@@ -6,6 +6,7 @@ from tqdm import tqdm
 from tools.evaluate import judge_math_item
 import matplotlib.pyplot as plt
 from tools.score.bemr import _calculate_bemr_final_score
+import copy
 
 def _load_memory_corpus(corpus_file: str):
     """辅助函数：读取记忆库文件"""
@@ -22,46 +23,70 @@ def _load_memory_corpus(corpus_file: str):
         print(f"⚠️ 无法读取记忆库文件 {corpus_file}，错误: {e}")
     return all_memory_ids, id_to_content
 
-def _calculate_scores(rag_results, all_memory_ids, cfg: DictConfig):
+def _calculate_scores(rag_results, all_memory_ids, cfg: DictConfig, old_stats=None):
     """
-    修改版：基于 BEMR (Bayesian-EM Memory Refinement) 计算记忆分数
-    [cite: 1040]
+    修改版：基于 BEMR (Bayesian-EM Memory Refinement) 计算分数
+    功能：
+    1. 继承上一轮状态 (持续学习)
+    2. 更新 Alpha/Beta (贝叶斯更新)
+    3. 捕获导致错误的 Query (作为 TextGrad 的梯度)
     """
-    # 1. 初始化统计量：alpha(正例), beta(负例)
-    # 论文建议初始化为 1 (Prior)，避免冷启动时的除零错误 
-    memory_stats = {mid: {'alpha': 1.0, 'beta': 1.0} for mid in all_memory_ids}
+    
+    # 1. 继承或初始化统计量
+    if old_stats:
+        # 深拷贝以防修改原引用
+        memory_stats = copy.deepcopy(old_stats)
+        # 补齐可能新增的记忆 ID (防止 Key Error)
+        for mid in all_memory_ids:
+            if mid not in memory_stats:
+                memory_stats[mid] = {'alpha': 1.0, 'beta': 1.0, 'pos_queries': [], 'neg_queries': []}
+    else:
+        # 冷启动：全部初始化为 Prior (1.0, 1.0)
+        memory_stats = {mid: {'alpha': 1.0, 'beta': 1.0, 'pos_queries': [], 'neg_queries': []} for mid in all_memory_ids}
+
     correct_count = 0
     
-    # 2. 遍历结果更新 Alpha/Beta (E-Step 的数据收集部分)
-    for item in tqdm(rag_results, desc="Scoring Memories (BEMR)"):
+    # 2. 遍历结果更新状态
+    for item in tqdm(rag_results, desc="Scoring & Capturing Gradients (BEMR)"):
         # 假设 judge_math_item 在外部作用域可用
         is_correct, _, _ = judge_math_item(item)
-        if is_correct:
-            correct_count += 1
+        if is_correct: correct_count += 1
+
+        # 获取当前 Query (这是 TextGrad 的“梯度”来源)
+        current_query = getattr(item, 'question', '')
 
         retrieved_docs = getattr(item, 'retrieval_result', [])
         
         for doc in retrieved_docs:
             doc_id = str(doc.get('id')) if isinstance(doc, dict) else str(getattr(doc, 'id', None))
             
-            # 只要 doc_id 存在于我们的库中，就进行贝叶斯更新
+            # 只要 doc_id 存在于我们的库中，就进行更新
             if doc_id and doc_id in memory_stats:
                 if is_correct:
-                    # 答对：增加 alpha 
-                    # 如果你想保留 cfg.experiment.reward 的权重控制，可以乘在 1 上，但标准 BEMR 是计数
-                    memory_stats[doc_id]['alpha'] += 1.0 
+                    # ✅ 答对：Alpha + 1
+                    memory_stats[doc_id]['alpha'] += 1.0
+                    # [E-Step] 记录正样本 (用于修正 Key)
+                    if current_query and current_query not in memory_stats[doc_id]['pos_queries']:
+                        memory_stats[doc_id]['pos_queries'].append(current_query)
                 else:
-                    # 答错：增加 beta
+                    # ❌ 答错：Beta + 1
                     memory_stats[doc_id]['beta'] += 1.0
+                    # [TextGrad] 记录负样本 (用于修正 Content) -> 这就是梯度！
+                    if current_query and current_query not in memory_stats[doc_id]['neg_queries']:
+                        memory_stats[doc_id]['neg_queries'].append(current_query)
 
-    # 3. 计算最终 BEMR 分数 (M-Step 准备阶段)
-    memory_scores = {}
+    # 3. 计算用于可视化的标量分数 (Mean Utility)
+    # 注意：memory_stats 才是我们要存盘的核心数据，final_scores_map 只是给 print/vis 用的
+    final_scores_map = {}
     for mid, stats in memory_stats.items():
-        # 调用辅助函数计算混合分数
-        score = _calculate_bemr_final_score(stats['alpha'], stats['beta'], cfg)
-        memory_scores[mid] = score
+        # 这里计算简单的均值用于热度展示: alpha / (alpha + beta)
+        # 你也可以调用 _calculate_bemr_final_score 算 UCB 分数
+        total = stats['alpha'] + stats['beta']
+        score = stats['alpha'] / total if total > 0 else 0.5
+        final_scores_map[mid] = score
     
-    return memory_scores, correct_count
+    # 返回三个值：可视化分数表，完整的统计状态，正确数
+    return final_scores_map, memory_stats, correct_count
 
 def _print_stats_and_save(memory_scores, id_to_content, total_questions, correct_count, freq_file):
     """辅助函数：打印统计信息并保存 JSONL 结果"""
@@ -70,9 +95,9 @@ def _print_stats_and_save(memory_scores, id_to_content, total_questions, correct
     
     # 统计信息
     total_mem = len(sorted_memories)
-    positive_mem = sum(1 for _, v in sorted_memories if v > 0)
-    negative_mem = sum(1 for _, v in sorted_memories if v < 0)
-    zero_mem = sum(1 for _, v in sorted_memories if v == 0)
+    positive_mem = sum(1 for _, v in sorted_memories if v > 0.51)
+    negative_mem = sum(1 for _, v in sorted_memories if v < 0.49)
+    zero_mem = sum(1 for _, v in sorted_memories if v < 0.51 and v > 0.49)
     
     print(f"📊 记忆库评分统计:")
     print(f"   - 总量: {total_mem}")
@@ -93,7 +118,7 @@ def _print_stats_and_save(memory_scores, id_to_content, total_questions, correct
                 record = {
                     "rank": rank,
                     "memory_id": mid,
-                    "freq": int(score), # 🔥 这里存的是分数
+                    "freq": round(score, 3), # 🔥 这里存的是分数
                     "contents": id_to_content.get(mid, "")
                 }
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -130,7 +155,7 @@ def _visualize_results(cfg: DictConfig, sorted_memories, vis_image_file: str):
             plt.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
             
             bars = plt.bar(plot_ids, plot_scores, color=colors, edgecolor='navy')
-            plt.title(f'Memory Utility Score (Correct=+2, Wrong=-2)', fontsize=14)
+            plt.title(f'Memory  Score', fontsize=14)
             plt.ylabel('Score')
             plt.xticks(rotation=90, fontsize=8) 
             
@@ -140,7 +165,7 @@ def _visualize_results(cfg: DictConfig, sorted_memories, vis_image_file: str):
                 if plot_ids[i] != "...": 
                     y_pos = height if height >= 0 else height - (max(scores)*0.05)
                     va = 'bottom' if height >= 0 else 'top'
-                    plt.text(bar.get_x() + bar.get_width()/2., y_pos, f'{int(height)}',
+                    plt.text(bar.get_x() + bar.get_width()/2., y_pos, f'{int(height*1000)/1000}',
                              ha='center', va=va, fontsize=8)
             
             plt.tight_layout()

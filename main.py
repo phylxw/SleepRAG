@@ -71,12 +71,12 @@ def main():
     # -----------------------------------------------------------
     # [步骤 3] Optimizer: 优化记忆 (高频聚合 + 低频扩写)
     # -----------------------------------------------------------
-    run_step("optimizerpro.py", pipeline_timestamp, "3. 记忆库优化 (聚合/扩写)", env=client_env)
+    run_step("optimizerultra.py", pipeline_timestamp, "3. 记忆库优化 (聚合/扩写)", env=client_env)
 
     # -----------------------------------------------------------
     # [步骤 4] Eval: 最终评测
     # -----------------------------------------------------------
-    # run_step("evalpro.py", pipeline_timestamp, "4. 最终 RAG 效果评测", env=client_env)
+    run_step("evalpro.py", pipeline_timestamp, "4. 最终 RAG 效果评测", env=client_env)
 
     print(f"\n🎉🎉🎉 全流程执行完毕！所有结果已生成。ID: {pipeline_timestamp}")
 

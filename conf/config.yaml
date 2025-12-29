@@ -1,7 +1,7 @@
 # conf/config.yaml
 defaults:
   - _self_
-  - experiment: gpqa  # 🔥 在这里一键切换数据集！(对应 conf/experiment/math_to_hmmt.yaml)
+  - experiment: math_self  # 🔥 在这里一键切换数据集！(对应 conf/experiment/math_to_hmmt.yaml) math_to_hmmt
   - optimizer: default        # 🔥 在这里切换优化策略
 
 timestamp: "${now:%Y%m%d_%H%M%S}"
@@ -12,17 +12,25 @@ paths:
   jsonl: "${paths.root}/outputs/jsonl"
   png: "${paths.root}/outputs/png"
   # 中间产物路径配置保持不变...
+  stats_file: "${paths.root}/${experiment.tag}_memory_stats.json"
+  stats_optimized_file: "${paths.root}/${experiment.tag}_memory_optimized_stats.json"
+  stats_after_file: "${paths.root}/${experiment.tag}_memory_after_stats.json"
   cluster_output: "${paths.jsonl}/${experiment.tag}_clustered_result.jsonl"
   cluster_summary: "${paths.jsonl}/${experiment.tag}_cluster_summary.jsonl"
   cluster_plot: "${paths.png}/${experiment.tag}_cluster_distribution.png"
   cluster_vis: "${paths.png}/${experiment.tag}_visualization.png"
   freq_file: "${paths.root}/${experiment.tag}_memory_freq.jsonl"
-  freq_after_file: "${paths.root}/${experiment.tag}_memory_freq.jsonl"
+  freq_after_file: "${paths.root}/${experiment.tag}_memory_after_freq.jsonl"
   optimized_memory: "${paths.root}/${experiment.tag}_optimized_memory_topk.jsonl"
   rag_cache_dir: "${paths.root}/rag_result_cache"
 
 # ================= 数学常数 =================
 parameters:
+  start_index: 0
+  debug_num: 200 # 调试时设小一点
+  retrieval_topk: 40
+  final_topk: 5
+  mode: "all" # 可选: baseline, rag, all
   bemr_lambda1: 1.0  # 历史效用权重
   bemr_lambda2: 0.5  # 探索/不确定性权重 (调大此值可保护低频记忆)
 # ================= 模型配置 =================
@@ -32,16 +40,24 @@ model:
   hf_name: "Qwen/Qwen3-4B-Instruct-2507"
   device: "cuda"
   batch_size: 20
-  max_input_len: 4096
+  max_input_len: 8192
   max_new_tokens: 2048
-  start_index: 0
-  debug_num: 10 # 调试时设小一点
 
-  
   gemini_name: "gemini-2.5-flash"
+
   sglang_api_url: "http://127.0.0.1:30000/v1"
   sglang_model_name: "Qwen/Qwen3-4B-Instruct-2507"
+  
+  # name: "Qwen/Qwen2.5-14B-Instruct" # 专家最好比学生 (Qwen-4B) 强，比如Qwen/Qwen2.5-14B-Instruct
+  # sglang_api_url: "http://127.0.0.1:30001/v1"
+
   embedding_name: "BAAI/bge-large-en-v1.5"
+
+
+expert_model:
+  source: "sglang"
+  name: "Qwen/Qwen2.5-14B-Instruct" # 专家最好比学生 (Qwen-4B) 强，比如Qwen/Qwen2.5-14B-Instruct
+  sglang_api_url: "http://127.0.0.1:30001/v1"
 
 # ================= 聚类配置 (相对稳定) =================
 cluster:

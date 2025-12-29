@@ -1,12 +1,9 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM
-import google.generativeai as genai
-import hydra
 from omegaconf import DictConfig
-import time
-from typing import Dict, List, Tuple, Set
+from typing import List
 import os
 import torch
-from utils.toolfunction import clean_special_chars,has_cuda
+from utils.toolfunction import clean_special_chars
 
 
 def init_llm(cfg: DictConfig):

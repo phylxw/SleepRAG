@@ -4,6 +4,7 @@ import os
 import json
 from tqdm import tqdm
 import random 
+from tools.prepare.merge_hmmt import merge_hmmt
 
 def _get_available_column(dataset, candidates, default):
     """辅助函数：在数据集里自动寻找存在的列名"""
@@ -66,6 +67,10 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
     # ==========================================
     # Part B: 准备测试集 (Test) -> 🔥 核心修改在这里
     # ==========================================
+    if cfg.experiment.tag=="hmmtex":
+        print(f"✅ 执行多HMMT组合测试文件下载")
+        merge_hmmt(test_file,cfg)
+        return True
     t_name = cfg.experiment.get("test_dataset_name") or c_name
     t_config = cfg.experiment.test_dataset_config if "test_dataset_config" in cfg.experiment else c_config
     t_split = cfg.experiment.get("test_split", "test")
@@ -90,8 +95,8 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
 
     # --- 切片与写入 ---
     with open(test_file, "w", encoding="utf-8") as f:
-        start_idx = int(cfg.model.get("start_index", 0) or 0)
-        debug_num = cfg.model.get("debug_num")
+        start_idx = int(cfg.parameters.get("start_index", 0) or 0)
+        debug_num = cfg.parameters.get("debug_num")
         
         total_len = len(ds_test)
         if debug_num:

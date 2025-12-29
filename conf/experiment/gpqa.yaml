@@ -1,7 +1,7 @@
 # conf/experiment/gpqa.yaml
 # 用途: 使用记忆库 (默认还是 MATH) 去测试 GPQA 科学选择题
 tag: "gpqa"
-mode: "all" # 可选: baseline, rag
+
 
 # ==========================================
 # 1. 记忆库配置 (Corpus)
