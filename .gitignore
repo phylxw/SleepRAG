@@ -1,10 +1,7 @@
 outputs/*
 .vscode/*
 rag_result_cache/*
-test1/*
-test2/*
-test3/*
-test4/*
+test/*
 __pycache__
 tmp.py
 *.zip
