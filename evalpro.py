@@ -104,7 +104,7 @@ def main(cfg: DictConfig):
     
     # 记忆库文件 & 索引目录 -> 跟随 corpus_tag (比如 MATH)
     corpus_file = cfg.paths.optimized_memory
-    index_dir = os.path.join(root_dir, f"{corpus_tag}_bm25_optimized_index")
+    index_dir = cfg.paths.index_optimized_dir
     
     # 测试集数据文件 -> 跟随 test_tag (比如 hmmt)
     # 这样你就不会把 MATH 的测试集覆盖掉了

@@ -1,6 +1,5 @@
-from typing import Dict, List, Tuple, Set
+from typing import Dict
 import numpy as np
-import torch
 from utils.toolfunction import has_cuda
 from sentence_transformers import SentenceTransformer
 

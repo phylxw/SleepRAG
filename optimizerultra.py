@@ -156,18 +156,18 @@ def optimize_memory(cfg: DictConfig):
         member_stats_list.sort(key=lambda x: (-x['win_rate'], -x['total']))
         best_mem = member_stats_list[0]
         
-        if best_mem['win_rate'] > 0.7 and best_mem['total'] > 2:
+        if best_mem['win_rate'] > 0.7 and best_mem['total'] > 4:
             for mem in member_stats_list[1:]:
                 is_trash = False
-                if mem['win_rate'] < 0.4 and mem['total'] > 2: is_trash = True
-                if best_mem['win_rate'] > 0.9 and mem['win_rate'] < 0.5: is_trash = True
+                if mem['win_rate'] < 0.3 and mem['total'] > 4: is_trash = True
+                if best_mem['win_rate'] >= 0.95 and mem['win_rate'] < 0.5: is_trash = True
                 if is_trash:
                     to_delete_ids.add(mem['id'])
                     pruned_count += 1
     print(to_delete_ids)
     print(f"✨ Pruning 完成，删除: {pruned_count}")
 
-# =========================================================
+    # =========================================================
     # 5. TextGrad (专家归因 -> 学生修正) - Batch 优化版
     # =========================================================
     print("\n========== TextGrad 记忆修正阶段 (Expert Batch Guided) ==========")
@@ -326,6 +326,24 @@ def optimize_memory(cfg: DictConfig):
             
     print(f"   🗑️ 已从 Stats 中移除 {len(to_delete_ids)} 条")
     print(f"   🔄 已重置 {len(optimized_ids)} 条 TextGrad 优化项")
+
+    # 3. 🔥 [核心修改] 清理列表，但保留分数
+    # 我们遍历 memory_stats 中剩下的所有 ID (包括被优化的 和 没被优化的)
+    # 统一清空 query 列表，防止下一轮重复记录，但保留 alpha/beta 作为先验
+    
+    cleaned_count = 0
+    for mid in memory_stats:
+        # 获取该记忆当前的统计对象
+        stats = memory_stats[mid]
+        # 不进行分数清洗
+        # stats['alpha'] = 1.0
+        # stats['beta'] = 1.0
+        stats['pos_queries'] = []
+        stats['neg_queries'] = []
+        cleaned_count += 1
+            
+    print(f"   🗑️ 已从 Stats 中移除 {len(to_delete_ids)} 条被删记忆")
+    print(f"   ✨ 已清理 {cleaned_count} 条记忆的 Query 列表 (分数已保留)")
     
     try:
         with open(stats_optimized_file, 'w', encoding='utf-8') as f:

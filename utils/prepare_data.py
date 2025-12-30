@@ -5,6 +5,7 @@ import json
 from tqdm import tqdm
 import random 
 from tools.prepare.merge_hmmt import merge_hmmt
+from tools.prepare.sci_split import prepare_sciknow
 
 def _get_available_column(dataset, candidates, default):
     """辅助函数：在数据集里自动寻找存在的列名"""
@@ -26,6 +27,10 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
     """
     通用数据准备函数 (支持 GPQA 选择题模式 + 智能列名探测)
     """
+    # 先检查sci
+    if cfg.experiment.tag == "sci":
+        # 直接调用分离出去的模块
+        return prepare_sciknow(corpus_file, test_file, cfg)
     
     # 1. 获取 yaml 里的默认配置 (优先用于 Memory)
     q_col_cfg = cfg.experiment.field_map.question
@@ -65,12 +70,13 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
         print(f"✅ [Memory] 检测到现有记忆库: {corpus_file}")
 
     # ==========================================
-    # Part B: 准备测试集 (Test) -> 🔥 核心修改在这里
+    # Part B: 准备测试集 (Test)
     # ==========================================
-    if cfg.experiment.tag=="hmmtex":
+    if cfg.experiment.tag == "hmmtex":
         print(f"✅ 执行多HMMT组合测试文件下载")
-        merge_hmmt(test_file,cfg)
+        merge_hmmt(test_file, cfg)
         return True
+    
     t_name = cfg.experiment.get("test_dataset_name") or c_name
     t_config = cfg.experiment.test_dataset_config if "test_dataset_config" in cfg.experiment else c_config
     t_split = cfg.experiment.get("test_split", "test")
@@ -83,15 +89,19 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
         return False
 
     # 🔥 判断是否为 GPQA (通过数据集名字判断)
-    is_gpqa = "gpqa" in t_name.lower()
+    is_gpqa = "gpqa" in str(t_name).lower()
+    # 注意：其实前面的 tag=="sci" 已经return了，这里 is_sciknow 基本不会触发
+    # 但为了逻辑完整性保留也可以，或者删掉
+    is_sciknow = "sci" in str(t_name).lower()
 
-    # 自动探测列名 (非 GPQA 时使用)
-    if not is_gpqa:
+    if not is_gpqa and not is_sciknow:
         q_col_test = _get_available_column(ds_test, q_candidates, q_col_cfg)
         a_col_test = _get_available_column(ds_test, a_candidates, a_col_cfg)
         print(f"   👉 自动匹配列名: Q='{q_col_test}', A='{a_col_test}'")
+    elif is_sciknow:
+        print(f"   👉 [Mode] SciKnowEval 科学模式已激活 (处理 choices 列表)")
     else:
-        print(f"   👉 [Mode] 检测到 GPQA 数据集，切换为选择题处理模式...")
+        print(f"   👉 [Mode] GPQA 选择题模式已激活")
 
     # --- 切片与写入 ---
     with open(test_file, "w", encoding="utf-8") as f:
@@ -112,39 +122,55 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
 
         for i, item in enumerate(selected_data):
             real_id = start_idx + i
-            
-            # 🔥 [关键修改] IF-ELSE 逻辑分支
-            if is_gpqa:
-                # === 分支 1: GPQA 选择题逻辑 ===
-                # 1. 获取原始字段
+
+            # 🔥🔥🔥 [关键修复] 使用 if-elif-else 互斥结构
+            if is_sciknow:
+                # === 分支 1: SciKnowEval 逻辑 ===
+                question_raw = item.get("question", "")
+                choices = item.get("choices", []) 
+                answer_raw = item.get("answer", "")
+                
+                options_str = ""
+                labels = ['A', 'B', 'C', 'D', 'E', 'F']
+                
+                if isinstance(choices, list):
+                    for idx, choice_text in enumerate(choices):
+                        label = labels[idx] if idx < len(labels) else str(idx)
+                        options_str += f"\n({label}) {choice_text}"
+                else:
+                    options_str = f"\n{str(choices)}"
+
+                q_text = question_raw + options_str
+                a_text = str(answer_raw)
+
+            elif is_gpqa:
+                # === 分支 2: GPQA 选择题逻辑 ===
                 question_raw = item.get("Question", "")
                 correct_ans = item.get("Correct Answer", "")
                 inc_ans_1 = item.get("Incorrect Answer 1", "")
                 inc_ans_2 = item.get("Incorrect Answer 2", "")
                 inc_ans_3 = item.get("Incorrect Answer 3", "")
                 
-                # 2. 组合选项并打乱
                 options = [correct_ans, inc_ans_1, inc_ans_2, inc_ans_3]
                 random.shuffle(options)
                 
-                # 3. 确定正确选项的字母 (A/B/C/D)
                 labels = ['A', 'B', 'C', 'D']
                 try:
                     correct_idx = options.index(correct_ans)
-                    final_ans = labels[correct_idx] # 答案就是 A, B, C 或 D
+                    final_ans = labels[correct_idx] 
                 except ValueError:
                     final_ans = "Error"
 
-                # 4. 构造带选项的问题文本
                 options_str = ""
                 for label, content in zip(labels, options):
                     options_str += f"\n({label}) {content}"
                 
                 q_text = question_raw + options_str
-                a_text = final_ans # 存入 golden_answers 的是字母
+                a_text = final_ans 
 
             else:
-                # === 分支 2: 普通填空题逻辑 (MATH/GSM8K) ===
+                # === 分支 3: 普通填空题逻辑 (MATH/GSM8K) ===
+                # 这里才去读之前探测到的列名
                 q_text = item.get(q_col_test, "")
                 a_text = item.get(a_col_test, "")
 

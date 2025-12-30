@@ -1,6 +1,7 @@
 # conf/experiment/hmmtex.yaml
 # 用途: 使用 MATH 构建记忆库，去测试合并后的 HMMT 历年真题集
 tag: "hmmtex"
+corpus: "MATH"
 mode: "rag" # 建议设为 'rag' 或 'all' 才能看到优化效果，设为 'baseline' 不会用优化后的记忆
 
 # 1. 记忆库配置 (Corpus)

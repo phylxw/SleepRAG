@@ -1,0 +1,51 @@
+# conf/experiment/sciqa.yaml
+# 用途: SciKnowEval 自切分实验 (80% Memory / 20% Test)
+tag: "sci"
+corpus: "sci"
+# 1. 记忆库配置
+# 这里填什么不重要，因为 prepare_data 检测到 tag="sci" 会自动生成文件覆盖它
+# 但为了路径解析正常，保留一个名字占位
+corpus_dataset_name: "hicai-zju/SciKnowEval" 
+corpus_dataset_config: null
+corpus_split: "train"
+
+# 2. 测试集配置
+# 同上，代码会自动生成
+test_dataset_name: "hicai-zju/SciKnowEval"
+test_dataset_config: null
+test_split: "test"
+
+visualize_memory: True
+
+# 字段映射 (SciKnowEval 标准字段)
+field_map:
+  question: "question"
+  answer: "answer"
+
+total_limit: 2000
+# 可选值通常为: "Biology", "Chemistry", "Physics", "Material Science"
+# 如果想跑混合模式，就设为 null
+target_domain: "Chemistry"
+# RAG 参数 (BEMR 必须)
+retrieval_method: "bm25"
+
+prompts:
+  # 科学专家设定
+  sys_msg : |
+    "You are a scientific domain expert. Answer the question concisely. If it is a true-or-false question, then the final answer will be either "Yes" or "No". End your answer with the final judgment or value enclosed in \\boxed{}.For example: \boxed{{Yes}} or \boxed{{No}}."
+  
+  rag_system: |
+        You are a scientific expert. Below are some similar solved problems. Refer to the logic in these examples to solve the new question.
+        
+        Solve the problem concisely. 
+        If it is a multiple-choice question, analyze the options and select the correct one.
+        If it is a true-or-false question, then the final answer will be either "Yes" or "No"
+        ⚠️ IMPORTANT: You MUST put the final answer within \boxed{{}}. For example: \boxed{{Yes}} or \boxed{{No}}.
+        
+        {reference}
+        
+        ### Question:
+        {question}
+        
+        ### Answer:
+        Let's think step by step.
