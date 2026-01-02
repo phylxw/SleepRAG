@@ -39,8 +39,8 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
     - root_dir, corpus_tag: 用于构造 stats 文件的保存路径
     """
     # 依然保留旧的 freq_file 用于兼容旧的可视化逻辑，但核心是下面的 stats_file
-    freq_after_file = cfg.paths.freq_after_file
-    print("\n🔍 [Analysis] 正在更新贝叶斯信念状态 (Bayesian Belief Update)...")
+    freq_after_file = None
+    print("\n🔍 [Analysis] 不更新贝叶斯信念状态 (Bayesian Belief Update)...")
 
     # 1. 加载数据
     all_memory_ids, id_to_content = _load_memory_corpus(corpus_file)
@@ -49,24 +49,15 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
     # 注意：这里接收了 new_stats (完整的字典)
     memory_scores, new_stats, correct_count = _calculate_scores(rag_results, all_memory_ids, cfg, old_stats)
 
-    # 3. 🔥 [BEMR 核心] 保存完整的记忆状态 (Stats + Gradients)
-    if root_dir and corpus_tag:
-        stats_after_file = cfg.paths.stats_after_file
-        try:
-            with open(stats_after_file, 'w', encoding='utf-8') as f:
-                json.dump(new_stats, f, ensure_ascii=False, indent=2)
-            print(f"💾 [BEMR] 已保存最新的记忆状态 (含 TextGrad 梯度) 至: {stats_after_file}")
-        except Exception as e:
-            print(f"⚠️ 保存记忆状态失败: {e}")
-
-    # 4. 打印统计并保存简易分数文件 (兼容旧逻辑)
+    # 3. 打印统计并保存简易分数文件 (兼容旧逻辑)
     # memory_scores 是标量分数，可以直接传给旧函数
     sorted_memories = _print_stats_and_save(
         memory_scores, 
         id_to_content, 
         len(rag_results), 
         correct_count, 
-        freq_after_file
+        freq_after_file,
+        is_write= False
     )
 
     # 5. 可视化
@@ -77,8 +68,8 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
 # ==========================================
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
-def main(cfg: DictConfig):
-    
+def evallast(cfg: DictConfig):
+    is_first = cfg.parameters.get("is_first", False)
     # 0. 基础设置与路径构造
     print("Visible GPU count:", torch.cuda.device_count())
     root_dir = cfg.paths.root
@@ -124,8 +115,9 @@ def main(cfg: DictConfig):
     print(f"🛠️ 模式: {cfg.parameters.mode} | 源: {cfg.model.source} | 数据集: {cfg.experiment.test_dataset_name}")
 
     # 1. 数据准备
-    need_split = cfg.parameters.get("split_corpus_for_val", False)
+    need_split = False
     if not prepare_data(cfg, corpus_file, test_file,need_split): return
+
     
     # 2. 索引构建 (如果是 rag 或 all 模式)
     if cfg.parameters.mode in ['rag', 'all']:
@@ -271,7 +263,7 @@ def main(cfg: DictConfig):
         return prompt
 
     # --- Task A: Baseline ---
-    if cfg.parameters.mode in ['baseline']:
+    if (cfg.parameters.mode in ['baseline']) or is_first:
         print("\n⚔️ [Task A] 正在运行 Baseline ...")
         
         baseline_inputs = []
@@ -338,7 +330,7 @@ def main(cfg: DictConfig):
             f"📊 数据集: {cfg.experiment.test_dataset_name}\n"
             f"🤖 模型: {model_source}\n"
             f"📉 Baseline: {acc_baseline:.2f}%\n"
-            f"📈 FlashRAG: {acc_rag:.2f}%\n"
+            f"📈 SleepRAG: {acc_rag:.2f}%\n"
             f"🚀 提升: {acc_rag - acc_baseline:+.2f}%\n"
             f"{'='*50}\n"
         )
@@ -348,4 +340,4 @@ def main(cfg: DictConfig):
         return summary
 
 if __name__ == "__main__":
-    main()
+    evallast()

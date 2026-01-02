@@ -23,19 +23,14 @@ def _get_available_column(dataset, candidates, default):
             return cand
     return default
 
-def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str, need_split):
+def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str):
     """
     通用数据准备函数 (支持 GPQA 选择题模式 + 智能列名探测)
     """
     # 先检查sci
-    is_val = False #是验证集吗？
     if cfg.experiment.tag == "sci":
         # 直接调用分离出去的模块
-        return prepare_sciknow(corpus_file, test_file, cfg, need_split)
-    if cfg.experiment.tag != "math_self":
-        is_val = need_split
-        need_split = False
-        
+        return prepare_sciknow(corpus_file, test_file, cfg)
     
     # 1. 获取 yaml 里的默认配置 (优先用于 Memory)
     q_col_cfg = cfg.experiment.field_map.question
@@ -46,110 +41,31 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str, need_split):
     a_candidates = [a_col_cfg, "solution", "answer", "ground_truth", "output", "completion", "Correct Answer"]
 
     # ==========================================
-    # Part A: 构建记忆库 (Corpus) + [新增] 自动切分验证集逻辑
+    # Part A: 构建记忆库 (Corpus) -> 保持原样
     # ==========================================
     c_name = cfg.experiment.get("corpus_dataset_name") or cfg.experiment.get("dataset_name")
     c_config = cfg.experiment.get("corpus_dataset_config") or cfg.experiment.get("dataset_config")
     c_split = cfg.experiment.get("corpus_split", "train")
 
-    # 🔥 [新增] 读取切分配置
-    # 建议在 yaml 里配置: split_ratio (例如 0.9 表示90%做记忆, 10%做验证) 或者 val_num (例如 200)
-    split_ratio = cfg.parameters.get("split_ratio", 0.9)
-    # val_num = cfg.experiment.get("val_subset_num", 0)  # 想要分出来多少条做验证
-    
-    # 只要文件不存在 或者 需要强制重新切分(防止用了旧的全量记忆)，就进入处理逻辑
-    # 注意：如果启用了 split，建议每次都重新生成，因为涉及到随机切分
-    if not os.path.exists(corpus_file) or need_split:
-        print(f"\n🔨 [Memory] 正在处理数据: {c_name} | Split: {c_split}")
+    if not os.path.exists(corpus_file):
+        print(f"\n🔨 [Memory] 正在构建记忆库: {c_name} | Split: {c_split}")
         try:
             ds_corpus = load_dataset(c_name, c_config, split=c_split)
         except Exception as e:
-            print(f"❌ 数据集下载失败: {e}")
+            print(f"❌ 记忆库下载失败: {e}")
             return False
             
-        # --- 1. 总量控制 (响应你刚才提到的只取前2000条的需求) ---
-        max_limit = cfg.parameters.get("total_limit_num", None) # 在 yaml parameters 里加这个参数
-        if max_limit is not None and len(ds_corpus) > int(max_limit):
-            print(f"✂️  截取前 {max_limit} 条数据进行实验")
-            ds_corpus = ds_corpus.select(range(int(max_limit)))
-
         q_col_mem = _get_available_column(ds_corpus, q_candidates, q_col_cfg)
         a_col_mem = _get_available_column(ds_corpus, a_candidates, a_col_cfg)
         print(f"   👉 自动匹配列名: Q='{q_col_mem}', A='{a_col_mem}'")
 
-        # --- 2. 执行切分逻辑 (核心修改) ---
-        if need_split and split_ratio > 0:
-            print(f"🔀 [Split] 检测到切分模式: 从 Corpus 中{len(ds_corpus)}条记忆划分 {1 - split_ratio} 的比例作为验证集(Test File)")
-            # 打乱数据 (设置固定 seed 保证复现)
-            ds_corpus = ds_corpus.shuffle(seed=42)
-            
-            # 确保数量不越界
-            split_idx = int(len(ds_corpus)*split_ratio)
-            if split_idx < 0: split_idx = 0
-            
-            # 切分
-            ds_memory = ds_corpus.select(range(0, split_idx)) # 大部分做记忆
-            ds_val = ds_corpus.select(range(split_idx, len(ds_corpus))) # 小部分做验证
-        else:
-            print(f"📦 [Full] 全量模式: 所有数据均用于构建记忆库")
-            ds_memory = ds_corpus
-            ds_val = None
-
-        # --- 3. 写入记忆库文件 (Corpus File) ---
         with open(corpus_file, "w", encoding="utf-8") as f:
-            for i, item in enumerate(tqdm(ds_memory, desc="Writing Corpus")):
+            for i, item in enumerate(tqdm(ds_corpus, desc="Writing Corpus")):
                 q_text = item.get(q_col_mem, "")
                 a_text = item.get(a_col_mem, "")
                 if q_text:
-                    # 记忆库格式: Question/Answer 纯文本
                     content = f"Question: {q_text}\nAnswer: {a_text}"
                     f.write(json.dumps({"id": str(i), "contents": content}) + "\n")
-        
-        # --- 4. [新增 & 修正] 如果切分了，把验证集写入 Test File (支持 start_index 和 debug_num) ---
-        if need_split and ds_val is not None:
-            print(f"📝 [Split] 正在将划分出的验证集写入: {test_file}")
-            
-            # === 👇 新增：读取调试参数 ===
-            start_idx = int(cfg.parameters.get("start_index", 0) or 0)
-            debug_num = cfg.parameters.get("debug_num")
-            
-            total_val_len = len(ds_val)
-            
-            # 计算切片范围
-            if debug_num:
-                limit = int(debug_num)
-                end_idx = min(start_idx + limit, total_val_len)
-            else:
-                end_idx = total_val_len
-            
-            # 防止 start_index 越界
-            if start_idx >= total_val_len:
-                print(f"⚠️ [Warning] start_index ({start_idx}) 超过了验证集总数 ({total_val_len})，将写入空文件。")
-                selected_val = []
-            else:
-                # 对验证集进行切片
-                indices = range(start_idx, end_idx)
-                selected_val = ds_val.select(indices)
-                print(f"📊 [Debug] 验证集截取生效: 范围[{start_idx}:{end_idx}] | 实际写入: {len(selected_val)} 条")
-
-            with open(test_file, "w", encoding="utf-8") as f:
-                for i, item in enumerate(tqdm(selected_val, desc="Writing Validation Set")):
-                    # === 👇 修正：ID 需要加上偏移量，保持唯一性 ===
-                    real_id = start_idx + i 
-                    
-                    q_text = item.get(q_col_mem, "")
-                    a_text = item.get(a_col_mem, "")
-                    
-                    # 写入符合 Eval 格式的数据
-                    f.write(json.dumps({
-                        "id": str(real_id),
-                        "question": q_text,
-                        "golden_answers": [str(a_text)] 
-                    }) + "\n")
-            
-            print(f"✅ [Done] 验证集准备完毕 (已截取)，跳过原始 Test Set 下载步骤")
-            return True  # 截断后续逻辑
-
     else:
         print(f"✅ [Memory] 检测到现有记忆库: {corpus_file}")
 
@@ -158,7 +74,7 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str, need_split):
     # ==========================================
     if cfg.experiment.tag == "hmmtex":
         print(f"✅ 执行多HMMT组合测试文件下载")
-        merge_hmmt(test_file, cfg, is_val)
+        merge_hmmt(test_file, cfg)
         return True
     
     t_name = cfg.experiment.get("test_dataset_name") or c_name

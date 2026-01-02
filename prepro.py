@@ -106,18 +106,20 @@ def main(cfg: DictConfig):
     # 记忆库文件 & 索引目录 -> 跟随 corpus_tag (比如 MATH)
     corpus_file = cfg.paths.corpus_file
     index_dir = cfg.paths.index_dir
+    result_dir = cfg.paths.result_dir
     
     # 测试集数据文件 -> 跟随 test_tag (比如 hmmt)
     # 这样你就不会把 MATH 的测试集覆盖掉了
-    test_file = os.path.join(root_dir, f"{test_tag}_test_data.jsonl")
+    jsonl_dir =  cfg.paths.jsonl
+    test_file = os.path.join(jsonl_dir, f"{test_tag}_test_data.jsonl")
     
     # 结果日志 -> 最好同时体现 "用什么库测什么题"
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     # 格式: HMMT_on_MATH_sglang_rag_2025...
-    result_log_file = os.path.join(root_dir, f"{test_tag}_on_{corpus_tag}_{cfg.model.source}_{cfg.parameters.mode}_{timestamp}.txt")
+    result_log_file = os.path.join(result_dir, f"{test_tag}_on_{corpus_tag}_{cfg.model.source}_{cfg.parameters.mode}_{timestamp}.txt")
     
     # 可视化图片 -> 跟随日志名
-    vis_image_file = os.path.join(root_dir, f"{test_tag}_on_{corpus_tag}_dist_{timestamp}.png")
+    vis_image_file = os.path.join(result_dir, f"{test_tag}_on_{corpus_tag}_dist_{timestamp}.png")
 
     if os.path.exists(result_log_file): os.remove(result_log_file)
     print(f"📝 结果将保存至: {result_log_file}")
@@ -125,7 +127,8 @@ def main(cfg: DictConfig):
     print(f"📚 Memory: {corpus_name} | 🎯 Test: {test_name}")
 
     # 1. 数据准备
-    if not prepare_data(cfg, corpus_file, test_file): return
+    need_split = cfg.parameters.get("split_corpus_for_val", False) 
+    if not prepare_data(cfg, corpus_file, test_file,need_split): return
     
     # 2. 索引构建 (如果是 rag 或 all 模式)
     if cfg.parameters.mode in ['rag', 'all']:

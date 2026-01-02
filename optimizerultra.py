@@ -86,8 +86,8 @@ def select_ids_from_stats(memory_stats: Dict[str, dict], cfg: DictConfig):
     # 筛选有错误记录的 ID
     bad_ids = [x[0] for x in scores if x[1] < 0.4 and x[2] > 2]
     
-    if len(bad_ids) < 10:
-         bad_ids = [x[0] for x in scores[-bottom_k:]]
+    # if len(bad_ids) < 10:
+    #      bad_ids = [x[0] for x in scores[-bottom_k:]]
 
     print(f"🔥 高分 Anchor: {len(high_ids)}")
     print(f"🥶 低分 Candidates: {len(bad_ids)}")

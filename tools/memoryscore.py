@@ -88,7 +88,7 @@ def _calculate_scores(rag_results, all_memory_ids, cfg: DictConfig, old_stats=No
     # 返回三个值：可视化分数表，完整的统计状态，正确数
     return final_scores_map, memory_stats, correct_count
 
-def _print_stats_and_save(memory_scores, id_to_content, total_questions, correct_count, freq_file):
+def _print_stats_and_save(memory_scores, id_to_content, total_questions, correct_count, freq_file ,is_write = True):
     """辅助函数：打印统计信息并保存 JSONL 结果"""
     # 排序 (按分数从高到低)
     sorted_memories = sorted(memory_scores.items(), key=lambda x: (-x[1], x[0]))
@@ -108,23 +108,24 @@ def _print_stats_and_save(memory_scores, id_to_content, total_questions, correct
     print(total_questions)
     print(f"   - 当前题目正确率: {correct_count/total_questions*100:.2f}%")
 
-    # 导出 jsonl
-    try:
-        print(f"💾 [Save] 正在导出记忆评分结果到: {freq_file}")
-        os.makedirs(os.path.dirname(freq_file), exist_ok=True)
-        
-        with open(freq_file, "w", encoding="utf-8") as f:
-            for rank, (mid, score) in enumerate(sorted_memories, start=1):
-                record = {
-                    "rank": rank,
-                    "memory_id": mid,
-                    "freq": round(score, 3), # 🔥 这里存的是分数
-                    "contents": id_to_content.get(mid, "")
-                }
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        print("✅ 评分文件导出完成！")
-    except Exception as e:
-        print(f"❌ 导出失败: {e}")
+    if is_write :
+        # 导出 jsonl
+        try:
+            print(f"💾 [Save] 正在导出记忆评分结果到: {freq_file}")
+            os.makedirs(os.path.dirname(freq_file), exist_ok=True)
+            
+            with open(freq_file, "w", encoding="utf-8") as f:
+                for rank, (mid, score) in enumerate(sorted_memories, start=1):
+                    record = {
+                        "rank": rank,
+                        "memory_id": mid,
+                        "freq": round(score, 3), # 🔥 这里存的是分数
+                        "contents": id_to_content.get(mid, "")
+                    }
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            print("✅ 评分文件导出完成！")
+        except Exception as e:
+            print(f"❌ 导出失败: {e}")
         
     return sorted_memories
 

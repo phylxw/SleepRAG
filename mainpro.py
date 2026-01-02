@@ -50,7 +50,7 @@ def get_round_paths(root_dir, pipeline_id, round_idx, tag="sci"):
     """
     base_dir = os.path.join(root_dir, "results", pipeline_id, f"round_{round_idx}")
     os.makedirs(base_dir, exist_ok=True)
-    
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
     return {
         "dir": base_dir,
         
@@ -96,6 +96,8 @@ def main(cfg: DictConfig):
     
     client_env = os.environ.copy()
     
+
+
     for r in range(TOTAL_ROUNDS):
         print(f"\n\n{'#'*80}")
         print(f"🔥🔥🔥 进入第 {r} 轮迭代 (Round {r}) 🔥🔥🔥")
@@ -132,13 +134,15 @@ def main(cfg: DictConfig):
         # --------------------------------------------------
         if r == 0:
             pre_overrides = {
-                "timestamp": pipeline_timestamp,
                 # Pre 输出到当前轮的 stats/corpus/freq
                 "paths.stats_file": curr_paths['stats'],
                 "paths.freq_file": curr_paths['freq'], 
                 "paths.corpus_file": curr_paths['corpus'],
-                "paths.test_file": curr_paths['test']
+                "paths.test_file": curr_paths['test'],
+                "paths.result_dir": curr_paths['dir'], 
             }
+            # 第一轮时的evallast：
+            run_step("evallast.py", f"首先进行一个测试集测试，进行效果查看",overrides = pre_overrides, env=client_env)
             # 如果是第一次，可能没有 stats 文件，prepro.py 会生成它
             run_step("prepro.py", f"R{r}-1. 初始数据准备", pre_overrides, env=client_env)
 
@@ -182,6 +186,7 @@ def main(cfg: DictConfig):
         # --------------------------------------------------
         # Step 4: Eval (生成 After 文件)
         # --------------------------------------------------
+        
         eval_overrides = {
             # Eval 评测的是刚刚优化好的记忆
             "paths.corpus_file": curr_paths['optimized_memory'],
@@ -193,17 +198,28 @@ def main(cfg: DictConfig):
             "paths.stats_after_file": curr_paths['stats_after'],
             "paths.freq_after_file": curr_paths['freq_after'],
             
-            "paths.rag_cache_dir": curr_paths['rag_cache']
+            "paths.rag_cache_dir": curr_paths['rag_cache'],
+            "parameters.is_first": False,
+
+            "paths.result_dir": curr_paths['dir'], 
         }
         
         # 检查 Optimizer 是否成功产出
         if not os.path.exists(curr_paths['stats_optimized']):
-             # 兜底逻辑：如果 Opt 没产出，就拷贝 input_stats 过来假装它是优化后的
-             import shutil
-             print(f"⚠️ 警告：Optimizer 未生成 Stats，沿用输入 Stats。")
-             shutil.copy(input_stats, curr_paths['stats_optimized'])
+            # 兜底逻辑：如果 Opt 没产出，就拷贝 input_stats 过来假装它是优化后的
+            import shutil
+            print(f"⚠️ 警告：Optimizer 未生成 Stats，沿用输入 Stats。")
+            shutil.copy(input_stats, curr_paths['stats_optimized'])
 
         run_step("evalpro.py", f"R{r}-4. 效果评测 & 更新After状态", eval_overrides, env=client_env)
+        if r < TOTAL_ROUNDS - 1:
+            # print("跳过")
+            run_step("evallast.py", f"R{r}-5. 测试集测试，效果查看", eval_overrides, env=client_env)
+        else:
+            run_step("evallast.py", f"R{r}-5. 测试集测试，效果查看", eval_overrides, env=client_env)
+
+        print(f"\n 一轮测试执行完毕！")
+
 
     print(f"\n🎉🎉🎉 全流程执行完毕！")
 
