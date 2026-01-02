@@ -18,7 +18,7 @@ paths:
   corpus_file: "${paths.jsonl}/${experiment.corpus}_corpus.jsonl"
   index_dir: "${paths.index}/${experiment.corpus}_bm25_index"
   optimized_memory: "${paths.jsonl}/${experiment.tag}_optimized_memory_topk.jsonl"
-  index_optimized_dir: "${paths.jsonl}/${experiment.tag}_bm25_index"
+  index_optimized_dir: "${paths.index}/${experiment.tag}_bm25_index"
   # 中间产物路径配置保持不变...
   stats_file: "${paths.json}/${experiment.tag}_memory_stats.json"
   stats_optimized_file: "${paths.json}/${experiment.tag}_memory_optimized_stats.json"

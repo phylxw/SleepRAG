@@ -1,5 +1,7 @@
 outputs/*
+index/*
 .vscode/*
+results/*
 rag_result_cache/*
 test/*
 __pycache__
