@@ -1,0 +1,174 @@
+# conf/optimizer/prime.yaml
+
+top_k_high: 50
+bottom_k_low: null
+low_freq_threshold: 1
+top_n_similar: 5
+llm_batch_size: 8
+prompts:
+    expand_low_freq: |
+      You are an expert Math Olympiad Coach.
+      [Goal]:
+      this memory can't help our model to solve problems, transform it into a high-quality problem-solving guide.
+      the memory is :
+      {text}
+      There are some high-quality memories from similar problems:
+      {good_examples}
+      Don't write too much and you'd better keep the key word of this question.
+      ⚠️ Output Format:
+      Question: ...
+      Answer: ...
+
+    xxxxx: |
+      You are a xxxx
+      Please comnine the following items
+      MEMORY1_BEGIN
+      {memory_1}
+      MEMORY1_END
+      ...
+      
+    textgrad_correction: |
+      You are optimizing a memory entry for a RAG system.
+      
+      [Original Memory]
+      {content}
+      
+      [Expert's Critique]
+      {gradient}
+      
+      [Positive Guidance]
+      Successful neighboring memories:
+      {good_examples}
+      
+      [Task]
+      1. First, analyze the Expert's critique and plan how to fix the memory.
+      2. Then, write the rewritten memory.
+      
+      [Format Requirement]
+      Wrap your final memory content strictly in \memory{{...}}.
+      
+      Example:
+      Reasoning: I need to add the formula for...
+      \memory{{
+      The formula is E=mc^2...
+      }}
+
+    gradient_generate: |
+      You are a Senior Knowledge Engineer diagnosing a RAG system memory.
+      [Target Memory]
+      {content}
+
+      [Failure Cases]
+      The system used this memory to answer the following queries but failed:
+      {neg_text}
+
+      [Task: Calculate Gradient]
+      Analyze WHY this memory failed.
+      - Is it missing specific formulas or conditions?
+      - Is it ambiguous?
+      - Is it a "Hubness" problem (irrelevant but high similarity)?
+
+      Provide a concise **Improvement Instruction** (The Gradient).
+      Start with "To fix this, you should..."
+
+    apply_gradient: |
+      You are a Knowledge Editor for a RAG system.
+      Your task is to rewrite the memory based on the Expert's critique.
+
+      [Original Memory]
+      {content}
+
+      [Expert's Critique]
+      {gradient}
+      {momentum_part}
+
+      [Goal]
+      Produce a clean, dense, and "ready-to-retrieve" knowledge snippet.
+
+      [Format Requirement]
+      Wrap your final memory content strictly in \memory{{...}}.
+
+    # 新增：专家分析错题集，指出知识盲区
+    gradient_reconstruct: |
+      You are a Knowledge Architect.
+      Here are {k} queries that triggered a retrieval failure:
+      {neg_queries}
+      
+      [Task]
+      Identify the MISSING KNOWLEDGE or COMMON MISCONCEPTION across these queries.
+      Don't analyze them one by one. Summarize the core concept that is needed to answer them all.
+      
+      Output a concise instruction (The Gradient) for a writer to create a new memory entry.
+      Start with: "Create a memory that explains..."
+
+    # 新增：学生根据指示重写
+    apply_gradient_reconstruct: |
+      You are a Technical Writer.
+      We found that our database lacks specific knowledge, causing errors in these queries:
+      {neg_queries}
+      
+      [Expert Instruction]
+      {gradient}
+      
+      [Task]
+      Write a BRAND NEW memory entry to fill this gap. 
+      Ignore any previous memory content.
+      Ensure the new memory directly answers the queries above.
+      [Format Requirement]
+      Wrap your final memory content strictly in \memory{{...}}.
+
+    gradient_decision_expert: |
+      You are a RAG System Administrator.
+      
+      [Target Memory]
+      {content}
+      
+      [Failed Queries]
+      The following queries retrieved this memory but failed to get the correct answer:
+      {neg_queries}
+      
+      [Task]
+      Analyze the relationship between the Memory and the Failed Queries. Decide the best strategy:
+      
+      1. REFINE: The memory is relevant but needs correction/detail. The queries belong to this topic.
+      2. EXPAND: The memory is okay, but the queries ask for a DISTINCT concept that deserves a NEW, separate memory entry. (We will keep the old one and add a new one).
+      3. REPLACE: The memory is hallucinated, garbage, or completely irrelevant to these queries. It should be discarded and rewritten from scratch based on the queries.
+      
+      [Output Format]
+      Provide your reasoning, then specific advice, and finally the action primitive.
+      
+      Reasoning: <Analysis>
+      Advice: \advice{{<Specific instructions on what to write/fix>}}
+      Action: \box{{<REFINE or EXPAND or REPLACE>}}
+
+    high_score_evolution: |
+      You are a Senior Knowledge Architect optimizing a 'Champion' memory entry.
+      This memory has a high success rate but failed on specific queries.
+
+      [Champion Memory]
+      {content}
+
+      [Failed Queries]
+      {neg_queries}
+
+      [Task]
+      Analyze the relationship between the Memory and the Failed Queries. Determine the best strategy:
+      
+      1. IGNORE: The queries are irrelevant noise or hallucinations. The memory is fine.
+      2. SUPPLEMENT: The memory is correct but missing a specific detail/edge case covering these queries. We need ONE new auxiliary memory.
+      3. SPLIT: The failed queries indicate a completely distinct sub-topic or multiple sub-topics that the original memory is too broad to cover. We need MULTIPLE new memories.
+
+      [Output Format]
+      Provide reasoning, then output the command block.
+      
+      - If IGNORE:
+        Reasoning: ...
+        Command: \box{{IGNORE}} \gradient{{None}}
+
+      - If SUPPLEMENT:
+        Reasoning: ...
+        Command: \box{{SUPPLEMENT}} \gradient{{<Instructions on what specific details to write in the new memory>}}
+
+      - If SPLIT (e.g., split into 2 or 3 new entries):
+        Reasoning: ...
+        Command: \box{{SPLIT}} \num{{<Integer Number of new memories>}} \gradient{{<Detailed instructions for EACH new memory, clearly separated>}}

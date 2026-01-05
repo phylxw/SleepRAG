@@ -53,7 +53,14 @@ def _calculate_scores(rag_results, all_memory_ids, cfg: DictConfig, old_stats=No
         if is_correct: correct_count += 1
 
         # 获取当前 Query (这是 TextGrad 的“梯度”来源)
-        current_query = getattr(item, 'question', '')
+        # 获取问题和答案
+        q = getattr(item, 'question', '').strip()
+        a = getattr(item, 'golden_answers', '')
+        # 🔥 改法 1: 紧凑型 (适合短文本)
+        # current_query = f"Question: {q} | Ground Truth: {a}"
+        # 🔥 改法 2: 结构化型 (推荐，适合 Math/Reasoning 长文本)
+        # 这样写，专家模型能一眼看清标准答案，从而生成更准确的梯度
+        current_query = f"[Question]: {q}\n   [Target Answer]: {a}"
 
         retrieved_docs = getattr(item, 'retrieval_result', [])
         

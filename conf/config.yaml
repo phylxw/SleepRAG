@@ -1,8 +1,8 @@
 # conf/config.yaml
 defaults:
   - _self_
-  - experiment: hmmtex  # 🔥 在这里一键切换数据集！hmmtex math_to_hmmt math_self sciqa
-  - optimizer: default        # 🔥 在这里切换优化策略
+  - experiment: math_self  # 🔥 在这里一键切换数据集！hmmtex math_self sciqa
+  - optimizer: prime        # 🔥 在这里切换优化策略
 
 timestamp: "${now:%Y%m%d_%H%M%S}"
 
@@ -37,17 +37,20 @@ paths:
   vis_image_file: "${paths.png}/${experiment.tag}_on_{experiment.corpus}_dist_{timestamp}.png"
   rag_cache_dir: "${paths.root}/rag_result_cache"
 
+  lowfreq_textgrad_log: "${paths.txt}/lowfreq_textgrad_optimization_log.txt"
+  highfreq_textgrad_log: "${paths.txt}/highfreq_textgrad_optimization_log.txt"
 # ================= 数学常数 =================
 parameters:
   is_first: True
-  total_rounds: 2
+  total_rounds: 3
+  resume_path: null # "/root/workspace/jychen/ex/results/20260102_114644_hmmtex_Loop/round_9"
   start_index: 0
-  debug_num: 5  # 调试时设小一点
+  debug_num: 100  # 调试时设小一点
   split_corpus_for_val: True
   split_ratio: 0.9
-  retrieval_topk: 40
+  retrieval_topk: 50
   final_topk: 5
-  mode: "all" # 可选: baseline, rag, all
+  mode: "rag" # 可选: baseline, rag, all
   bemr_lambda1: 1.0  # 历史效用权重
   bemr_lambda2: 0.5  # 探索/不确定性权重 (调大此值可保护低频记忆)
 # ================= 模型配置 =================
@@ -75,6 +78,7 @@ expert_model:
   source: "sglang"
   name: "Qwen/Qwen2.5-14B-Instruct" # 专家最好比学生 (Qwen-4B) 强，比如Qwen/Qwen2.5-14B-Instruct
   sglang_api_url: "http://127.0.0.1:30001/v1"
+  max_new_tokens: 8192
 
 # ================= 聚类配置 (相对稳定) =================
 cluster:

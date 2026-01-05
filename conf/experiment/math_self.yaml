@@ -1,6 +1,6 @@
 # conf/experiment/math_self.yaml
 # 用途: 使用 MATH 构建记忆库，去测试 HMMT 数据集
-tag: "math"
+tag: "math_self"
 corpus: "MATH"
 mode: "all" # all, baseline, rag
 
