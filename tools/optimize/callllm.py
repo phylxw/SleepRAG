@@ -4,7 +4,12 @@ from typing import List
 import os
 import torch
 from utils.toolfunction import clean_special_chars
-
+import logging
+from tqdm import tqdm # [新增]
+import concurrent.futures
+# [新增] 屏蔽 httpx 和 httpcore 的 INFO 日志，防止刷屏
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 def init_llm(cfg: DictConfig):
     """初始化 LLM"""
@@ -56,10 +61,12 @@ def init_llm(cfg: DictConfig):
         except ImportError:
             print("❌ [Init] 缺少 openai 库，请运行 `pip install openai`")
 
-def call_llm(prompt: str, cfg: DictConfig, max_new_tokens: int = None) -> str:
-    """统一的大模型调用接口，单条调用"""
+def call_llm(prompt: str, cfg: DictConfig, max_new_tokens: int = None, verbose: bool = True) -> str:
+    """
+    统一的大模型调用接口，单条调用
+    新增 verbose 参数：True=打印进度(默认), False=静默模式(用于Batch)
+    """
     model_source = cfg.model.optimize
-    # 如果没传 max_new_tokens，就用 config 里的默认值
     if max_new_tokens is None:
         max_new_tokens = cfg.model.max_new_tokens
 
@@ -70,22 +77,25 @@ def call_llm(prompt: str, cfg: DictConfig, max_new_tokens: int = None) -> str:
         try:
             import google.generativeai as genai
             model = genai.GenerativeModel(cfg.model.gemini_name)
-            print("  🤖 [Gemini] 正在生成...", end="", flush=True)
+            if verbose:
+                print(" 🤖 [Gemini] 正在生成...", end="", flush=True)
             resp = model.generate_content(prompt)
-            print(" 完成")
+            if verbose:
+                print(" 完成")
             return clean_special_chars(resp.text.strip())
         except Exception as e:
-            print(f"\n❌ [Gemini Error]: {e}")
+            if verbose: print(f"\n❌ [Gemini Error]: {e}")
             return ""
 
     # --- HuggingFace 本地 ---
     elif model_source == "huggingface":
         if GLOBAL_MODEL is None:
-            print("⚠️ [Local] LLM 尚未初始化")
+            if verbose: print("⚠️ [Local] LLM 尚未初始化")
             return ""
 
         try:
-            print("  🚀 [Local] 正在生成...", end="", flush=True)
+            if verbose:
+                print(" 🚀 [Local] 正在生成...", end="", flush=True)
             messages = [
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": prompt}
@@ -115,10 +125,11 @@ def call_llm(prompt: str, cfg: DictConfig, max_new_tokens: int = None) -> str:
                 for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
             ]
             response = GLOBAL_TOKENIZER.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            print(" 完成")
+            if verbose:
+                print(" 完成")
             return clean_special_chars(response.strip())
         except Exception as e:
-            print(f"\n❌ [Local Error]: {e}")
+            if verbose: print(f"\n❌ [Local Error]: {e}")
             return ""
 
     # --- SGLang ---
@@ -128,7 +139,9 @@ def call_llm(prompt: str, cfg: DictConfig, max_new_tokens: int = None) -> str:
         
         model_name = cfg.model.get("sglang_model_name", "Qwen/Qwen3-4B-Instruct-2507")
         try:
-            print("  🚀 [SGLang] 正在推理...", end="", flush=True)
+            if verbose:
+                print(" 🚀 [SGLang] 正在推理...", end="", flush=True)
+            
             resp = GLOBAL_SGLANG_CLIENT.chat.completions.create(
                 model=model_name,
                 messages=[
@@ -139,16 +152,19 @@ def call_llm(prompt: str, cfg: DictConfig, max_new_tokens: int = None) -> str:
                 max_tokens=max_new_tokens
             )
             content = resp.choices[0].message.content
-            print(" 完成")
+            
+            if verbose:
+                print(" 完成")
             return clean_special_chars(content.strip())
         except Exception as e:
-            print(f"\n❌ [SGLang Error]: {e}")
+            if verbose: print(f"\n❌ [SGLang Error]: {e}")
             return ""
 
     return ""
 
+
 def call_llm_batch(prompts: List[str], cfg: DictConfig, max_new_tokens: int = None) -> List[str]:
-    """批量调用 LLM"""
+    """批量调用 LLM (SGLang 并发优化 + 进度条版)"""
     if not prompts:
         return []
     
@@ -156,30 +172,47 @@ def call_llm_batch(prompts: List[str], cfg: DictConfig, max_new_tokens: int = No
     if max_new_tokens is None:
         max_new_tokens = cfg.model.max_new_tokens
 
-    # Gemini：简单循环
+    # --- SGLang 并发加速 (带 tqdm 进度条) ---
+    if model_source == "sglang":
+        max_workers = cfg.model.get("batch_size", 32)
+        
+        results = [None] * len(prompts)
+        
+        # 使用线程池并发，并传入 verbose=False 禁止内部 print
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {
+                executor.submit(call_llm, p, cfg, max_new_tokens, verbose=False): i 
+                for i, p in enumerate(prompts)
+            }
+            
+            # 🔥 修改点：使用 tqdm 包裹迭代器，显示进度条
+            for future in tqdm(concurrent.futures.as_completed(future_to_idx), total=len(prompts), desc="🚀 SGLang Batch"):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    # 只有出错才打印
+                    print(f"\n❌ [Batch Error] Task {idx} failed: {e}")
+                    results[idx] = ""
+        
+        return results
+
+    # --- Gemini (保持串行) ---
     if model_source == "gemini":
         results = []
-        for p in prompts:
+        # Gemini 也可以加个简单的进度条，如果需要的话
+        for p in tqdm(prompts, desc="🤖 Gemini Batch"):
             results.append(call_llm(p, cfg, max_new_tokens=max_new_tokens))
         return results
 
-    # SGLang: 简单循环调用 (Server端会自动处理并发)
-    if model_source == "sglang":
-        results = []
-        # 虽然这里写的是循环，但 SGLang Server 的吞吐很高，速度通常比本地 HF Batch 快
-        # 如果需要极致并发，可以使用 asyncio 或 ThreadPoolExecutor，但简单循环通常足够快且稳定
-        for p in prompts:
-            results.append(call_llm(p, cfg, max_new_tokens=max_new_tokens))
-        return results
-
-    # HuggingFace 本地
+    # --- HuggingFace 本地 (HF本身支持Batch推理，逻辑不变) ---
     if model_source == "huggingface":
         if GLOBAL_MODEL is None:
             print("⚠️ [Local] LLM 尚未初始化")
             return [""] * len(prompts)
 
         try:
-            print(f"  🚀 [Local-Batch] 正在批量生成 {len(prompts)} 条...", end="", flush=True)
+            print(f" 🚀 [Local-Batch] 正在批量生成 {len(prompts)} 条...", end="", flush=True)
             
             messages_list = [
                 [
@@ -197,11 +230,10 @@ def call_llm_batch(prompts: List[str], cfg: DictConfig, max_new_tokens: int = No
                 for msgs in messages_list
             ]
 
-            # 批量 Tokenize + Padding
             model_inputs = GLOBAL_TOKENIZER(
                 text_list,
                 return_tensors="pt",
-                padding=True, # 关键
+                padding=True,
                 truncation=True,
                 max_length=cfg.model.max_input_len,
             ).to(GLOBAL_MODEL.device)

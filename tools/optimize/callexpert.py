@@ -74,29 +74,51 @@ def call_expert(prompt: str, cfg: DictConfig) -> str:
         print(f"❌ [Expert Error]: {e}")
         return None
 
+import concurrent.futures
+from typing import List
+from omegaconf import DictConfig
+import logging
+from tqdm import tqdm  # 记得 pip install tqdm
+
+# 1. 屏蔽 httpx 和 httpcore 的 INFO 日志，防止刷屏
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 def call_expert_batch(prompts: List[str], cfg: DictConfig) -> List[str]:
     """
-    🔥 [New] 批量并发调用专家模型
-    对于 SGLang/OpenAI，使用多线程并发发送请求，服务端会自动 Batch 处理。
+    🔥 [New] 批量并发调用专家模型 (带进度条 + 日志屏蔽)
     """
     if not prompts: return []
     
     source = cfg.expert_model.source
     
-    # 1. 如果是 SGLang/OpenAI，使用线程池并发 (这是提速的关键！)
+    # 1. 如果是 SGLang/OpenAI，使用线程池并发 (提速 + 进度条)
     if source in ["sglang", "openai"]:
-        # 并发数可以设大一点，比如 16 或 32，SGLang 处理得过来
+        # 并发数可以设大一点，SGLang 处理得过来
         max_workers = 16 
+        
+        results = [None] * len(prompts)
+        
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 提交所有任务
-            futures = [executor.submit(call_expert, p, cfg) for p in prompts]
-            # 获取结果 (保持顺序)
-            results = [f.result() for f in futures]
+            # 提交任务，建立 Future -> Index 的映射
+            future_to_idx = {
+                executor.submit(call_expert, p, cfg): i 
+                for i, p in enumerate(prompts)
+            }
+            
+            # 使用 tqdm 包裹 as_completed，显示实时进度
+            for future in tqdm(concurrent.futures.as_completed(future_to_idx), total=len(prompts), desc="🧠 Expert Batch"):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    print(f"\n❌ [Expert Batch Error] Task {idx} failed: {e}")
+                    results[idx] = ""
+                    
         return results
 
-    # 2. 如果是 Gemini，考虑到速率限制 (Rate Limit)，建议串行或保守并发
-    # 这里保持简单循环，避免 429 Error
+    # 2. 如果是 Gemini，保持简单循环 (防止 429)，但加上进度条
     results = []
-    for p in prompts:
+    for p in tqdm(prompts, desc="🤖 Gemini Expert"):
         results.append(call_expert(p, cfg))
     return results

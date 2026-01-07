@@ -9,7 +9,7 @@ def parse_memory(output_text):
         return ""
         
     # 1. 尝试匹配 \memory{...}，使用 DOTALL 匹配换行
-    match = re.search(r'\\memory\{(.*?)\}', output_text, re.DOTALL)
+    match = re.search(r'\\memory\{(.*)\}', output_text, re.DOTALL)
     if match:
         return match.group(1).strip()
     
@@ -21,3 +21,8 @@ def parse_memory(output_text):
     # 简单的清理：去掉可能的 "Sure, ..." 前缀
     clean_text = re.sub(r'^(Sure|Here|Okay).*?:\n', '', output_text, flags=re.IGNORECASE).strip()
     return clean_text
+
+if __name__ == "__main__":
+    text = "\\sdfvds\\bsb\sfsbsdfbsd\\dbasdfbsfgnbsfgn\memory{我是cjy}sfbgsnngfstrnfgfndtynsrtnqtbs\dfbds\fbdfb\sdb\bds"
+    text2 = "xgfndyd654nd+5fy4n6mdtyj8e65rhjr4h6drjdrerh6316tj78e56n1"
+    print(parse_memory(text2))

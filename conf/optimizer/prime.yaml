@@ -1,10 +1,23 @@
 # conf/optimizer/prime.yaml
 
-top_k_high: 50
-bottom_k_low: null
+top_k_high: 100
+bottom_k_low: 100
 low_freq_threshold: 1
 top_n_similar: 5
-llm_batch_size: 8
+llm_batch_size: 64
+
+max_memory_len: 8192
+
+prune:
+  enabled: true
+  verbose: true
+  z: 1.64                 # ~90% one-sided
+  min_cluster_size: 2
+  skip_negative_cluster: true
+  min_obs_best: 6
+  best_lcb_thr: 0.70
+  trash_ucb_thr: 0.35
+  max_prune_per_cluster: 3
 prompts:
     expand_low_freq: |
       You are an expert Math Olympiad Coach.
@@ -33,25 +46,37 @@ prompts:
       [Original Memory]
       {content}
       
-      [Expert's Critique]
-      {gradient}
+      [Critique / Gradient]
+      This memory was INCORRECTLY retrieved for the following queries:
+      {neg_text}
       
       [Positive Guidance]
       Successful neighboring memories:
       {good_examples}
       
       [Task]
-      1. First, analyze the Expert's critique and plan how to fix the memory.
-      2. Then, write the rewritten memory.
-      
-      [Format Requirement]
-      Wrap your final memory content strictly in \memory{{...}}.
-      
-      Example:
-      Reasoning: I need to add the formula for...
-      \memory{{
-      The formula is E=mc^2...
-      }}
+      Rewrite the memory content to be more SPECIFIC and avoid the errors above.
+      Output ONLY the rewritten content.
+
+    apply_gradient: |
+      You are a Knowledge Editor for a RAG system.
+      Your task is to rewrite the memory based on the Expert's critique.
+
+      [Original Memory]
+      {content}
+
+      [Expert's Critique]
+      {gradient}
+      {momentum_part}
+
+      [Constraints]
+      1. **NO Meta-data**: Do NOT include fields like "Domain:", "Problem Type:", "Reasoning Path:", "Cluster:", "Note:", etc.
+      2. **NO Fluff**: Do NOT write introductions like "This memory helps with..." or "Here is the rewritten memory".
+      3. **Direct Content**: Start directly with the core knowledge (Formulas, Theorems, Key Steps, or Python Code).
+      4. **Latex Format**: Use standard latex for math.
+
+      [Goal]
+      Produce a clean, dense, and "ready-to-retrieve" knowledge snippet.
 
     gradient_generate: |
       You are a Senior Knowledge Engineer diagnosing a RAG system memory.
@@ -71,24 +96,7 @@ prompts:
       Provide a concise **Improvement Instruction** (The Gradient).
       Start with "To fix this, you should..."
 
-    apply_gradient: |
-      You are a Knowledge Editor for a RAG system.
-      Your task is to rewrite the memory based on the Expert's critique.
 
-      [Original Memory]
-      {content}
-
-      [Expert's Critique]
-      {gradient}
-      {momentum_part}
-
-      [Goal]
-      Produce a clean, dense, and "ready-to-retrieve" knowledge snippet.
-
-      [Format Requirement]
-      Wrap your final memory content strictly in \memory{{...}}.
-
-    # 新增：专家分析错题集，指出知识盲区
     gradient_reconstruct: |
       You are a Knowledge Architect.
       Here are {k} queries that triggered a retrieval failure:
@@ -101,47 +109,91 @@ prompts:
       Output a concise instruction (The Gradient) for a writer to create a new memory entry.
       Start with: "Create a memory that explains..."
 
-    # 新增：学生根据指示重写
-    apply_gradient_reconstruct: |
-      You are a Technical Writer.
-      We found that our database lacks specific knowledge, causing errors in these queries:
-      {neg_queries}
-      
-      [Expert Instruction]
-      {gradient}
-      
-      [Task]
-      Write a BRAND NEW memory entry to fill this gap. 
-      Ignore any previous memory content.
-      Ensure the new memory directly answers the queries above.
-      [Format Requirement]
-      Wrap your final memory content strictly in \memory{{...}}.
+    
+    
+    # 低分记忆处理区（优化版：更稳健的解析、更少幻觉、更强可复现性）
 
-    gradient_decision_expert: |
-      You are a RAG System Administrator.
-      
+    low_grad_expert: |
+      You are a Senior Memory Auditor for a Retrieval-Augmented Generation (RAG) system.
+
       [Target Memory]
       {content}
-      
-      [Failed Queries]
-      The following queries retrieved this memory but failed to get the correct answer:
-      {neg_queries}
-      
-      [Task]
-      Analyze the relationship between the Memory and the Failed Queries. Decide the best strategy:
-      
-      1. REFINE: The memory is relevant but needs correction/detail. The queries belong to this topic.
-      2. EXPAND: The memory is okay, but the queries ask for a DISTINCT concept that deserves a NEW, separate memory entry. (We will keep the old one and add a new one).
-      3. REPLACE: The memory is hallucinated, garbage, or completely irrelevant to these queries. It should be discarded and rewritten from scratch based on the queries.
-      
-      [Output Format]
-      Provide your reasoning, then specific advice, and finally the action primitive.
-      
-      Reasoning: <Analysis>
-      Advice: \advice{{<Specific instructions on what to write/fix>}}
-      Action: \box{{<REFINE or EXPAND or REPLACE>}}
 
-    high_score_evolution: |
+      [Failed Queries]
+      These queries retrieved the Target Memory but the final answers were judged incorrect:
+      {neg_queries}
+
+      [Your Job]
+      Diagnose why this memory fails for these queries, then choose ONE of the following actions:
+
+      - REFINE: The memory is on-topic, but is incomplete/unclear/has minor inaccuracies for these queries.
+      - EXPAND: The memory is on-topic but mixes multiple concepts OR the failed queries require an adjacent concept. Keep the old memory (refine it lightly) AND create one new memory for the missing subtopic.
+      - REPLACE: The memory is off-topic, misleading, or low-quality. Discard it and write a new memory targeted to the failed queries.
+
+      [Grounding Rules]
+      - Prefer evidence from the Target Memory and the Failed Queries.
+      - If you add new factual claims, keep them minimal and only include high-confidence, stable facts. Avoid uncertain specifics.
+      - Do NOT include any policy, meta-commentary, or apologies.
+
+      [Output Format — STRICT]
+      Output EXACTLY the following three lines (no extra text):
+
+      Analysis: \box{{<1 sentence root cause>}}
+      Advice: \advice{{<actionable edit instructions with bullets. Include: (i) what to add/remove; (ii) 3–8 retrieval keywords; (iii) if EXPAND/REPLACE, define the scope of the NEW memory. Keep <=180 words.>}}
+      Action: \box{{REFINE|EXPAND|REPLACE}}
+
+    appgrad_low_refine: |
+      You are a Knowledge Editor for a RAG system.
+
+      [Original Memory]
+      {content}
+
+      [Expert Advice]
+      {gradient}
+
+      [Task]
+      Rewrite the memory so that it is:
+      - Correct, precise, and directly useful for answering the failed queries described in the Expert Advice.
+      - Atomic: focus on ONE concept/topic; remove unrelated content.
+      - Retrieval-friendly: include 3–8 keywords (as a short "Keywords:" line) that match likely user queries.
+
+      [Hard Constraints]
+      - Do NOT invent uncertain facts. If something is unclear, rephrase conservatively.
+      - Output ONE memory only.
+      - Output NOTHING except the memory wrapper.
+
+      [Output Format — STRICT]
+      \memory{{<rewritten memory>}}
+
+    appgrad_low_replace: |
+      You are a Knowledge Editor creating a NEW memory for a RAG system.
+
+      [Failed Queries]
+      {neg_queries}
+
+      [Expert Advice]
+      {gradient}
+
+      [Task]
+      Create ONE brand-new, atomic memory entry that fills the missing knowledge for the failed queries.
+
+      [Guidelines]
+      - Focus on the smallest sufficient scope that answers the failed queries.
+      - Prefer general, stable facts and clear procedures over fragile details.
+      - Add a "Keywords:" line with 3–10 keywords/aliases that help retrieval.
+      - Avoid hallucinations: only include high-confidence statements. If a detail is uncertain, omit it.
+
+      [Hard Constraints]
+      - Output ONE memory only.
+      - Output NOTHING except the memory wrapper.
+
+      [Output Format — STRICT]
+      \memory{{<new memory>}}
+
+
+    # 高分记忆处理区
+
+    high_grad_expert: |
       You are a Senior Knowledge Architect optimizing a 'Champion' memory entry.
       This memory has a high success rate but failed on specific queries.
 
@@ -153,22 +205,62 @@ prompts:
 
       [Task]
       Analyze the relationship between the Memory and the Failed Queries. Determine the best strategy:
-      
-      1. IGNORE: The queries are irrelevant noise or hallucinations. The memory is fine.
-      2. SUPPLEMENT: The memory is correct but missing a specific detail/edge case covering these queries. We need ONE new auxiliary memory.
-      3. SPLIT: The failed queries indicate a completely distinct sub-topic or multiple sub-topics that the original memory is too broad to cover. We need MULTIPLE new memories.
+
+      - IGNORE: The failure is unrelated/noise; no new memory needed.
+      - SUPPLEMENT: The existing memory is broadly correct, but misses a specific edge-case/detail. Create ONE new auxiliary memory that fills the gap.
+      - SPLIT: The champion memory is broadly correct, but misses the specific edge-case/detail from Failed Queries; so propose another one specific memory to contain the information.
 
       [Output Format]
-      Provide reasoning, then output the command block.
-      
+      Provide brief reasoning (1-3 sentences), then output ONE command line:
+
       - If IGNORE:
         Reasoning: ...
         Command: \box{{IGNORE}} \gradient{{None}}
 
       - If SUPPLEMENT:
         Reasoning: ...
-        Command: \box{{SUPPLEMENT}} \gradient{{<Instructions on what specific details to write in the new memory>}}
+        Command: \box{{SUPPLEMENT}} \gradient{{<Very specific instructions on what missing detail to write in the new memory>}}
 
-      - If SPLIT (e.g., split into 2 or 3 new entries):
+      - If SPLIT:
         Reasoning: ...
-        Command: \box{{SPLIT}} \num{{<Integer Number of new memories>}} \gradient{{<Detailed instructions for EACH new memory, clearly separated>}}
+        Command: \box{{SPLIT}}  \gradient{{<Instructions for the new memory">}}
+
+    appgrad_high_supplement: |
+      You are a Technical Writer.
+      We have an existing memory that is generally correct but missed some edge cases.
+
+      [Existing Memory]
+      {original_content}
+
+      [Expert Advice]
+      {advice}
+
+      [Task]
+      Write ONE new memory entry that specifically addresses the missed queries and advice.
+      Do NOT repeat the existing memory content. Focus on the missing details.
+      Output ONLY the new memory content.
+
+      [Format Requirement]
+      Wrap your final memory content strictly in \memory{{...}}.
+
+    appgrad_high_split: |
+      You are a Technical Writer.
+      We need to create a new distinct memory entry based on expert's advice.
+
+      [Missed Queries]
+      {neg_text}
+
+      [Expert Advice]
+      {advice}
+
+      [Task]
+      Write exactly a separate memory entry.
+      Each entry must be:
+      - Self-contained and accurate
+      - Focused on a distinct sub-topic / failure mode (do NOT overlap heavily)
+      - Directly helpful for answering the missed queries
+
+      [Format Requirement]
+      Output ONLY one block, each wrapped in \memory{{...}}.
+      Do NOT add extra text, numbering, or delimiters outside the \memory{{...}} blocks.
+

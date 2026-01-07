@@ -258,8 +258,8 @@ def main(cfg: DictConfig):
             "paths.optimized_memory": curr_paths['optimized_memory'],
             "paths.stats_optimized_file": curr_paths['stats_optimized'], 
         }
-        run_step("optimizerXtreme.py", f"R{r}-3. 记忆优化", opt_overrides, env=client_env)
-
+        # run_step("optimizerXtreme.py", f"R{r}-3. 记忆优化", opt_overrides, env=client_env)
+        run_step("optimizerY.py", f"R{r}-3. 记忆优化", opt_overrides, env=client_env)
         # --------------------------------------------------
         # Step 4: Eval
         # --------------------------------------------------

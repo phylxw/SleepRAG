@@ -8,7 +8,7 @@ corpus: "sci"
 corpus_dataset_name: "hicai-zju/SciKnowEval" 
 corpus_dataset_config: null
 corpus_split: "train"
-
+target_domain: "mcq-4-choices"
 # 2. 测试集配置
 # 同上，代码会自动生成
 test_dataset_name: "hicai-zju/SciKnowEval"

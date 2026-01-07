@@ -32,7 +32,7 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str, need_split):
     if cfg.experiment.tag == "sci":
         # 直接调用分离出去的模块
         return prepare_sciknow(corpus_file, test_file, cfg, need_split)
-    if cfg.experiment.tag != "math_self":
+    if (cfg.experiment.tag != "math_self") and (cfg.experiment.tag != "gsm8k_self"):
         is_val = need_split
         need_split = False
         

@@ -1,0 +1,47 @@
+# conf/experiment/gsm8k_self.yaml
+tag: "gsm8k_self"
+corpus: "GSM8K"
+mode: "all" 
+
+# 1. 记忆库配置 (GSM8K)
+corpus_dataset_name: "openai/gsm8k"
+corpus_dataset_config: "main"
+corpus_split: "train"
+
+# 2. 测试集配置
+test_dataset_name: "openai/gsm8k"
+test_dataset_config: "main"
+test_split: "test"
+
+visualize_memory: True
+
+# 🔥 关键修改：字段映射
+# MATH 的列名是 problem/solution
+# GSM8K 的列名是 question/answer
+field_map:
+  question: "question"
+  answer: "answer"
+
+# RAG 参数
+retrieval_topk: 3
+retrieval_method: "bm25"
+reward: 2
+punishment: -1
+
+# Prompt 建议微调：
+# GSM8K 是小学数学应用题，更强调 Step-by-step reasoning。
+# 原来的 Prompt 强制要求 "brief" (简短) 和 "fractions" (分数)，可能不太适合 GSM8K 的风格。
+# 下面是一个适配 GSM8K 的 Prompt 版本：
+prompts:
+  sys_msg : |
+    "You are a math expert. Solve the grade school math problem step by step. End your answer with \boxed{number}."
+  
+  rag_system: |
+        You are a math expert. Below are some similar solved problems. Refer to the logic in these examples to solve the new question.
+        Solve the problem step by step to ensure accuracy.
+        ⚠️ IMPORTANT: You MUST put the final answer within \boxed{{}}. For example: \boxed{{10}}.
+        {reference}
+        ### Question:
+        {question}
+        ### Answer:
+        Let's think step by step.

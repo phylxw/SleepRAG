@@ -13,11 +13,11 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 from tools.optimize.callllm import init_llm, call_llm_batch
 from tools.optimize.callexpert import init_expert_llm, call_expert, call_expert_batch
 from tools.optimize.memoryload import load_clustered_memories, load_cluster_summary
-from optimize.select import select_ids_from_stats
-from optimize.prune import prune
+from optimizeold.select import select_ids_from_stats
+from optimizeold.prune import prune
 # 一定要引用我们刚刚改好的新版 textgrad_opt
-from optimize.textgrad_optpro import textgrad_opt 
-from optimize.evolve import evolve_high_score_opt
+from optimizeold.textgrad_optpro import textgrad_opt 
+from optimizeold.evolve import evolve_high_score_opt
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def optimize_memory(cfg: DictConfig):

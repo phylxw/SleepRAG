@@ -7,7 +7,7 @@ from tools.optimize.callllm import init_llm, call_llm_batch
 from tools.optimize.callexpert import init_expert_llm, call_expert, call_expert_batch
 from tools.optimize.memoryload import load_clustered_memories, load_cluster_summary
 # 保留原有导入
-from optimize.prompt_generate import generate_gradient_prompt, apply_gradient_prompt, summarize_experience_prompt, expand_low_freq_memory_prompt
+from optimize.prompt_generate import summarize_experience_prompt, expand_low_freq_memory_prompt
 from utils.memorywrap import parse_memory
 
 def textgrad_opt(cfg, memories, memory_stats, cluster_to_ids, bad_ids, to_delete_ids):
@@ -76,8 +76,7 @@ def textgrad_opt(cfg, memories, memory_stats, cluster_to_ids, bad_ids, to_delete
                 neg_text = "\n".join([f"- {q}" for q in selected_negs])
                 
                 # 🔥 直接使用 Config 中的决策 Prompt，而不是调用固定函数
-                # 假设 yaml 中有 cfg.optimizer.prompts.gradient_decision_expert
-                decision_prompt = cfg.optimizer.prompts.gradient_decision_expert.format(
+                decision_prompt = cfg.optimizer.prompts.low_grad_expert.format(
                     content=base_text,
                     neg_queries=neg_text
                 )
@@ -146,7 +145,8 @@ def textgrad_opt(cfg, memories, memory_stats, cluster_to_ids, bad_ids, to_delete
                     
                     # 1. REFINE (优化)
                     if action == "REFINE":
-                        prompt = apply_gradient_prompt(meta['base_text'], gradient, meta['good_examples_str'], cfg)
+                        reconstruct_tpl = cfg.optimizer.prompts.appgrad_low_refine
+                        prompt = reconstruct_tpl.format(content=meta['base_text'], gradient=gradient)                       
                         log_info["student_prompt"] = prompt
                         student_prompts.append(prompt)
                         # 🔥 [修复点 1] 加上 "log": log_info
@@ -159,8 +159,7 @@ def textgrad_opt(cfg, memories, memory_stats, cluster_to_ids, bad_ids, to_delete
                         
                     # 2. REPLACE (删增/替换)
                     elif action == "REPLACE":
-                        reconstruct_tpl = cfg.optimizer.prompts.get("apply_gradient_reconstruct", 
-                            "Create a new memory based on these failed queries:\n{neg_queries}\nAdvice:\n{gradient}\nOutput ONLY content.")
+                        reconstruct_tpl = cfg.optimizer.prompts.appgrad_low_replace
                         prompt = reconstruct_tpl.format(neg_queries=meta['neg_text'], gradient=gradient)
                         log_info["student_prompt"] = prompt
                         student_prompts.append(prompt)
@@ -175,7 +174,8 @@ def textgrad_opt(cfg, memories, memory_stats, cluster_to_ids, bad_ids, to_delete
                     # 3. EXPAND (增加)
                     elif action == "EXPAND":
                         # Task A
-                        prompt_a = apply_gradient_prompt(meta['base_text'], "Keep the original topic but improve clarity based on: " + gradient, meta['good_examples_str'], cfg)
+                        reconstruct_tpl = cfg.optimizer.prompts.appgrad_low_refine
+                        prompt_a = reconstruct_tpl.format(content=meta['base_text'], gradient=gradient)    
                         
                         log_info_a = log_info.copy()
                         log_info_a["student_prompt"] = prompt_a
@@ -192,7 +192,7 @@ def textgrad_opt(cfg, memories, memory_stats, cluster_to_ids, bad_ids, to_delete
                         
                         # Task B
                         new_id = str(uuid.uuid4())
-                        reconstruct_tpl = cfg.optimizer.prompts.get("apply_gradient_reconstruct", "")
+                        reconstruct_tpl = cfg.optimizer.prompts.appgrad_low_replace
                         prompt_b = reconstruct_tpl.format(neg_queries=meta['neg_text'], gradient=gradient)
                         
                         log_info_b = log_info.copy()
