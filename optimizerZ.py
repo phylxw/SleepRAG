@@ -13,7 +13,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 from tools.optimize.callllm import init_llm, call_llm_batch
 from tools.optimize.callexpert import init_expert_llm, call_expert, call_expert_batch
 from tools.optimize.memoryload import load_clustered_memories, load_cluster_summary
-from optimize.selectold import select_ids_from_stats
+from optimize.selector import select_ids_from_stats
 from optimize.prune import prune
 # 一定要引用我们刚刚改好的新版 textgrad_opt
 from optimize.textgrad_opt import textgrad_opt 
@@ -50,15 +50,15 @@ def optimize_memory(cfg: DictConfig):
         return
 
     # =========================================================
-    # 3. 筛选 (Select)
+    # 3. 筛选 (Select) - Tri-Stream Logic
     # =========================================================
-    # high_ids: 高分记忆, bad_ids: 低分记忆
-    high_ids, bad_ids = select_ids_from_stats(memory_stats, cfg)
+    # 接收三个返回值
+    high_ids, bad_ids, evolve_ids = select_ids_from_stats(memory_stats, cfg)
 
     # =========================================================
     # 4. 剪枝 (Prune) - 标记要删除的 ID
     # =========================================================
-    to_delete_ids = prune(memories, memory_stats, cfg=cfg)
+    to_delete_ids = prune(memories, memory_stats, high_ids,cfg=cfg)
     print(f"🗑️ 计划删除 {len(to_delete_ids)} 条冗余/无效记忆")
 
     # =========================================================
@@ -66,7 +66,7 @@ def optimize_memory(cfg: DictConfig):
     # =========================================================
     # 针对高分但有瑕疵的记忆，生成 SUPPLEMENT 或 SPLIT
     # 注意：这些新 ID 已经在 memory_stats 里初始化过了
-    new_supplement_ids = evolve_high_score_opt(cfg, memories, memory_stats, high_ids)
+    new_supplement_ids = evolve_high_score_opt(cfg, memories, memory_stats, evolve_ids)
 
     # =========================================================
     # 5. 低分优化 (TextGrad with Primitives)

@@ -3,6 +3,8 @@ import concurrent.futures
 from typing import List
 from omegaconf import DictConfig
 from utils.toolfunction import clean_special_chars
+import logging
+from tqdm import tqdm
 
 # 定义一个全局的专家客户端
 GLOBAL_EXPERT_CLIENT = None
@@ -25,19 +27,32 @@ def init_expert_llm(cfg: DictConfig):
         except ImportError:
             print("❌ [Expert-Init] 缺少 google-generativeai 库")
 
-    elif source in ["openai", "sglang"]:
+    # 🔥 [修改点 1] 将 qwen 加入到 openai 兼容列表
+    elif source in ["openai", "sglang", "qwen"]:
         try:
             from openai import OpenAI
-            # SGLang 也是用 OpenAI 客户端
+            # 默认配置 (OpenAI)
             base_url = os.environ.get("EXPERT_BASE_URL", "https://api.openai.com/v1")
             api_key = os.environ.get("EXPERT_API_KEY")
             
+            # 针对 SGLang 的特殊配置
             if source == "sglang":
                 base_url = expert_cfg.get("sglang_api_url", "http://127.0.0.1:30000/v1")
                 api_key = "EMPTY"
+            
+            # 🔥 [修改点 2] 针对 Qwen (DashScope) 的特殊配置
+            elif source == "qwen":
+                # 阿里云百炼兼容模式 endpoint
+                base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                # 优先读环境变量 DASHSCOPE_API_KEY，如果没有则读 EXPERT_API_KEY，最后才是硬编码（不推荐）
+                api_key = "sk-dab5c76d636e4e4b9567b0c45d73ba83"
+                
+                # 如果环境变量没设，为了方便调试，你可以暂时用这里的硬编码 (但生产环境请删掉)
+                if not api_key:
+                    api_key = "sk-dab5c76d636e4e4b9567b0c45d73ba83" # 你的 Key
 
             GLOBAL_EXPERT_CLIENT = OpenAI(base_url=base_url, api_key=api_key)
-            print(f"✅ [Expert-Init] {source.upper()} Client ({expert_cfg.name}) 就绪")
+            print(f"✅ [Expert-Init] {source.upper()} Client ({expert_cfg.name}) 就绪 | URL: {base_url}")
         except ImportError:
             print("❌ [Expert-Init] 缺少 openai 库")
     else:
@@ -45,7 +60,7 @@ def init_expert_llm(cfg: DictConfig):
 
 
 def call_expert(prompt: str, cfg: DictConfig) -> str:
-    """单条调用 (内部逻辑保持不变，供 Batch 调用使用)"""
+    """单条调用"""
     global GLOBAL_EXPERT_CLIENT
     if GLOBAL_EXPERT_CLIENT is None: return None
 
@@ -57,16 +72,20 @@ def call_expert(prompt: str, cfg: DictConfig) -> str:
             resp = GLOBAL_EXPERT_CLIENT.generate_content(prompt)
             return clean_special_chars(resp.text.strip())
         
-        elif source in ["openai", "sglang"]:
+        # 🔥 [修改点 3] Qwen 也走这里，但注意：这里不使用 stream=True
+        # 因为在代码逻辑中，我们需要完整的字符串返回，而不是生成器
+        elif source in ["openai", "sglang", "qwen"]:
             resp = GLOBAL_EXPERT_CLIENT.chat.completions.create(
-                model=model_name,
+                model=model_name, # 这里会传入 qwen-max 或 qwen3-max
                 messages=[
                     {"role": "system", "content": "You are a helpful and critical AI expert."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
-                # SGLang 专家通常需要长一点的输出空间写分析
-                max_tokens=1024 
+                # 注意：如果 Qwen 报错 "max_tokens too large"，可以适当调小或注释掉
+                # qwen-max 支持长文本，一般没问题
+                # max_tokens=1024, 
+                stream=False  # ❌ 关掉流式，方便后续处理
             )
             return clean_special_chars(resp.choices[0].message.content.strip())
 
@@ -74,11 +93,6 @@ def call_expert(prompt: str, cfg: DictConfig) -> str:
         print(f"❌ [Expert Error]: {e}")
         return None
 
-import concurrent.futures
-from typing import List
-from omegaconf import DictConfig
-import logging
-from tqdm import tqdm  # 记得 pip install tqdm
 
 # 1. 屏蔽 httpx 和 httpcore 的 INFO 日志，防止刷屏
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -86,28 +100,28 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 def call_expert_batch(prompts: List[str], cfg: DictConfig) -> List[str]:
     """
-    🔥 [New] 批量并发调用专家模型 (带进度条 + 日志屏蔽)
+    🔥 批量并发调用专家模型
     """
     if not prompts: return []
     
     source = cfg.expert_model.source
     
-    # 1. 如果是 SGLang/OpenAI，使用线程池并发 (提速 + 进度条)
-    if source in ["sglang", "openai"]:
-        # 并发数可以设大一点，SGLang 处理得过来
+    # 🔥 [修改点 4] 允许 Qwen 进行并发
+    if source in ["sglang", "openai", "qwen"]:
+        # Qwen 的并发限制：
+        # 如果是普通账号，Qwen-max 的并发 (QPS) 可能较低。
+        # 如果报错 429 Too Many Requests，请把 max_workers 改小 (例如 2 或 4)
         max_workers = 16 
         
         results = [None] * len(prompts)
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 提交任务，建立 Future -> Index 的映射
             future_to_idx = {
                 executor.submit(call_expert, p, cfg): i 
                 for i, p in enumerate(prompts)
             }
             
-            # 使用 tqdm 包裹 as_completed，显示实时进度
-            for future in tqdm(concurrent.futures.as_completed(future_to_idx), total=len(prompts), desc="🧠 Expert Batch"):
+            for future in tqdm(concurrent.futures.as_completed(future_to_idx), total=len(prompts), desc=f"🧠 {source.upper()} Batch"):
                 idx = future_to_idx[future]
                 try:
                     results[idx] = future.result()
@@ -117,7 +131,7 @@ def call_expert_batch(prompts: List[str], cfg: DictConfig) -> List[str]:
                     
         return results
 
-    # 2. 如果是 Gemini，保持简单循环 (防止 429)，但加上进度条
+    # Gemini 保持原有逻辑
     results = []
     for p in tqdm(prompts, desc="🤖 Gemini Expert"):
         results.append(call_expert(p, cfg))

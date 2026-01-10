@@ -1,0 +1,316 @@
+# conf/optimizer/prime.yaml
+
+top_k_high: 100
+bottom_k_low: 256
+low_freq_threshold: 1
+top_n_similar: 5
+llm_batch_size: 128
+
+max_memory_len: 8192
+
+prune:
+  enabled: true
+  verbose: true
+  z: 1.64                 # ~90% one-sided
+  min_cluster_size: 2
+  skip_negative_cluster: true
+  min_obs_best: 6
+  best_lcb_thr: 0.70
+  trash_ucb_thr: 0.35
+  max_prune_per_cluster: 3
+prompts:
+    expand_low_freq: |
+      You are an expert Math Olympiad Coach.
+      [Goal]:
+      this memory can't help our model to solve problems, transform it into a high-quality problem-solving guide.
+      the memory is :
+      {text}
+      There are some high-quality memories from similar problems:
+      {good_examples}
+      Don't write too much and you'd better keep the key word of this question.
+      ⚠️ Output Format:
+      Question: ...
+      Answer: ...
+
+    xxxxx: |
+      You are a xxxx
+      Please comnine the following items
+      MEMORY1_BEGIN
+      {memory_1}
+      MEMORY1_END
+      ...
+      
+    textgrad_correction: |
+      You are optimizing a memory entry for a RAG system.
+      
+      [Original Memory]
+      {content}
+      
+      [Critique / Gradient]
+      This memory was INCORRECTLY retrieved for the following queries:
+      {neg_text}
+      
+      [Positive Guidance]
+      Successful neighboring memories:
+      {good_examples}
+      
+      [Task]
+      Rewrite the memory content to be more SPECIFIC and avoid the errors above.
+      Output ONLY the rewritten content.
+
+    apply_gradient: |
+      You are a Knowledge Editor for a RAG system.
+      Your task is to rewrite the memory based on the Expert's critique.
+
+      [Original Memory]
+      {content}
+
+      [Expert's Critique]
+      {gradient}
+      {momentum_part}
+
+      [Constraints]
+      1. NO Meta-data: Do NOT include fields like "Domain:", "Problem Type:", "Reasoning Path:", "Cluster:", "Note:", etc.
+      2. NO Fluff: Do NOT write introductions like "This memory helps with..." or "Here is the rewritten memory".
+      3. Direct Content: Start directly with the core knowledge (Formulas, Theorems, Key Steps, or Python Code).
+      4. Latex Format: Use standard latex for math.
+
+      [Goal]
+      Produce a clean, dense, and "ready-to-retrieve" knowledge snippet.
+
+    gradient_generate: |
+      You are a Senior Knowledge Engineer diagnosing a RAG system memory.
+      [Target Memory]
+      {content}
+
+      [Failure Cases]
+      The system used this memory to answer the following queries but failed:
+      {neg_text}
+
+      [Task: Calculate Gradient]
+      Analyze WHY this memory failed.
+      - Is it missing specific formulas or conditions?
+      - Is it ambiguous?
+      - Is it a "Hubness" problem (irrelevant but high similarity)?
+
+      Provide a concise Improvement Instruction (The Gradient).
+      Start with "To fix this, you should..."
+
+
+    gradient_reconstruct: |
+      You are a Knowledge Architect.
+      Here are {k} queries that triggered a retrieval failure:
+      {neg_queries}
+      
+      [Task]
+      Identify the MISSING KNOWLEDGE or COMMON MISCONCEPTION across these queries.
+      Don't analyze them one by one. Summarize the core concept that is needed to answer them all.
+      
+      Output a concise instruction (The Gradient) for a writer to create a new memory entry.
+      Start with: "Create a memory that explains..."
+
+    
+    
+    # 低分记忆处理区（优化版：更稳健的解析、更少幻觉、更强可复现性）
+
+    # =================================================================
+    # 📉 Low Score Memory Expert (Diagnosis)
+    # =================================================================
+    low_grad_expert: |
+      <|im_start|>system
+      You are a Senior Memory Auditor for a Retrieval-Augmented Generation (RAG) system.
+      
+      [GOAL]
+      Analyze why the [Target Memory] failed to support the [Failed Queries]. Identify the missing reasoning frameworks or methodologies.
+      
+      [INPUT DATA]
+      <target_memory>
+      {content}
+      </target_memory>
+      
+      <failed_queries>
+      {neg_queries}
+      </failed_queries>
+      
+      [DECISION RULES]
+      Choose ONE action based on the gap analysis:
+      1. REFINE: The memory has the right topic but lacks depth. It needs detailed "how-to" steps.
+      2. EXPAND: The memory is too narrow. A new, broader problem-solving paradigm is needed for these queries.
+      3. REPLACE: The memory is misleading or useless. Discard it and create a new core analytical framework.
+      
+      [OUTPUT FORMAT STRICT]
+      Analysis: \box{{<One sentence diagnosing the missing logic/methodology.>}}
+      Advice: \advice{{<Actionable instructions. MUST include: (i) Abstract principles/logic chains; (ii) 3-8 retrieval keywords; (iii) Scope definition if EXPAND/REPLACE. Keep <= 180 words.>}}
+      Action: \box{{REFINE|EXPAND|REPLACE}}
+      <|im_end|>
+      <|im_start|>user
+      Start your analysis now.
+      <|im_end|>
+      <|im_start|>assistant
+      Let's analyze the gap step by step.
+
+    # =================================================================
+    # 🛠️ Application: REFINE (Update existing memory)
+    # =================================================================
+    appgrad_low_refine: |
+      <|im_start|>system
+      You are a Cognitive Knowledge Engineer. Rewrite a memory entry to improve its reasoning depth.
+      
+      [INPUTS]
+      <original_memory>
+      {content}
+      </original_memory>
+      
+      <expert_advice>
+      {gradient}
+      </expert_advice>
+      
+      [INSTRUCTIONS]
+      1. GENERALIZE: Transform the advice into a universal rule or framework.
+      2. METHODOLOGY: Focus on *how* to solve the problem (derivation steps, formulas), not just facts.
+      3. KEYWORDS: Add a "Keywords:" line with 3-8 functional keywords (e.g., "Chain of Thought", "Derivation").
+      4. CONTENT: The content MUST be detailed. DO NOT just write a title.
+      
+      [FORMAT STRICT]
+      Output ONLY the memory wrapper:
+      \memory{{<Full detailed content with logic/framework>}}
+      <|im_end|>
+      <|im_start|>user
+      Refine the memory now.
+      <|im_end|>
+      <|im_start|>assistant
+
+    # =================================================================
+    # 🛠️ Application: REPLACE (New memory from scratch)
+    # =================================================================
+    appgrad_low_replace: |
+      <|im_start|>system
+      You are a Cognitive Knowledge Creator. Create a BRAND NEW memory entry.
+      
+      [INPUTS]
+      <failed_queries>
+      {neg_queries}
+      </failed_queries>
+      
+      <expert_advice>
+      {gradient}
+      </expert_advice>
+      
+      [INSTRUCTIONS]
+      1. ABSTRACT THE LOGIC: Extract the underlying principle, algorithm, or methodology needed to solve these queries.
+      2. NO EXAMPLES ONLY: Do not just list the Q&A. Define the general rule first, then use the queries as examples.
+      3. DETAILED CONTENT: CRITICAL: You must provide the full reasoning steps, formulas, or code. Do NOT output a single line title.
+      4. KEYWORDS: Add "Keywords:" with 3-10 functional tags.
+      
+      [FORMAT STRICT]
+      Output ONLY the memory wrapper:
+      \memory{{<New detailed memory content>}}
+      <|im_end|>
+      <|im_start|>user
+      Create the new memory.
+      <|im_end|>
+      <|im_start|>assistant
+
+
+  # =================================================================
+  # 📈 High Score Memory Expert (Diagnosis)
+  # =================================================================
+    high_grad_expert: |
+      <|im_start|>system
+      You are a Senior Cognitive Architect optimizing a 'Champion' memory (high success rate).
+      
+      [INPUT DATA]
+      <champion_memory>
+      {content}
+      </champion_memory>
+      
+      <failed_queries>
+      {neg_queries}
+      </failed_queries>
+      
+      [TASK]
+      Analyze why this strong memory failed on these specific queries. Determine the strategy:
+      
+      1. IGNORE: Failure is noise/irrelevant.
+      2. SUPPLEMENT: The query needs an exception handling or nuance added to the existing logic.
+      3. SPLIT: The query represents a distinct sub-domain requiring a standalone specialized memory.
+      
+      [OUTPUT FORMAT STRICT]
+      Reasoning: <1-3 sentences on the logical gap>
+      Command: \box{{IGNORE|SUPPLEMENT|SPLIT}} \gradient{{<Specific instructions for the update>}}
+      <|im_end|>
+      <|im_start|>user
+      Analyze the failure.
+      <|im_end|>
+      <|im_start|>assistant
+      Let's think step by step.
+
+    # =================================================================
+    # 🛠️ Application: SUPPLEMENT (Add edge case logic)
+    # =================================================================
+    appgrad_high_supplement: |
+      <|im_start|>system
+      You are a Cognitive Knowledge Integrator.
+      
+      [GOAL]
+      Create a Unified Memory by appending new logic for edge cases to the existing memory.
+      
+      [INPUTS]
+      <existing_memory>
+      {original_content}
+      </existing_memory>
+      
+      <expert_advice>
+      {advice}
+      </expert_advice>
+      
+      [INSTRUCTIONS]
+      1. PRESERVE CORE: Keep the valid info from Existing Memory.
+      2. ADD LOGIC: Append a section (e.g., "Exception Handling", "Advanced Case") based on Expert Advice.
+      3. NO TITLES: The added section must contain actual reasoning steps.
+      
+      [FORMAT STRICT]
+      Output ONLY the memory wrapper:
+      \memory{{
+      <Refined original content>
+      <New logic for edge cases>
+      }}
+      <|im_end|>
+      <|im_start|>user
+      Merge the memory.
+      <|im_end|>
+      <|im_start|>assistant
+
+    # =================================================================
+    # 🛠️ Application: SPLIT (Create specialized memory)
+    # =================================================================
+    appgrad_high_split: |
+      <|im_start|>system
+      You are a Specialized Knowledge Architect.
+      
+      [GOAL]
+      Create a standalone "Specialized Logic" memory for a distinct sub-domain.
+      
+      [INPUTS]
+      <missed_queries>
+      {neg_text}
+      </missed_queries>
+      
+      <expert_advice>
+      {advice}
+      </expert_advice>
+      
+      [INSTRUCTIONS]
+      1. METHODOLOGY FIRST: Define the algorithm, decision tree, or framework for this sub-domain.
+      2. SCOPE: Clearly state *when* this specialized logic applies.
+      3. SELF-CONTAINED: It must make sense without the parent memory.
+      4. DETAILED: Do NOT produce a summary or a title. Write out the full logic.
+      
+      [FORMAT STRICT]
+      Output ONLY the memory wrapper:
+      \memory{{<New specialized memory content>}}
+      <|im_end|>
+      <|im_start|>user
+      Create the specialized memory.
+      <|im_end|>
+      <|im_start|>assistant

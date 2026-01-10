@@ -1,0 +1,8 @@
+# ================= 聚类配置 (相对稳定) =================
+method: "agglomerative"
+distance_threshold: 1.0
+kmeans_n_clusters: 10
+vis_method: "tsne"
+enable_pca_preprocess: True
+pca_preprocess_dims: 50
+tsne_perplexity: 40

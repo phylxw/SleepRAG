@@ -1,0 +1,38 @@
+# 核心聚类方法
+method: "kmeans_auto"                # 选项: hdbscan, kmeans, kmeans_auto, agglomerative
+
+# HDBSCAN 参数 (用于发现噪声和任意形状的簇)
+hdbscan_min_cluster_size: 5      # 最小簇大小
+hdbscan_min_samples: null        # (可选) 越大越保守
+hdbscan_metric: "euclidean"      # 距离度量
+hdbscan_selection_method: "eom"  # 簇选择方法
+
+# 可视化降维方法
+vis_method: "umap"               # 选项: umap, tsne, pca
+
+# UMAP 参数 (用于画出漂亮的流形)
+umap_supervised: true            # 是否利用聚类标签指导降维 (画图更聚拢)
+umap_target_weight: 0.5          # 标签指导的权重 (0-1)
+umap_n_neighbors: 15             # 邻居数，越小越关注局部
+umap_min_dist: 0.1               # 点之间的最小距离
+umap_metric: "cosine"            # UMAP 内部度量
+
+# PCA 预处理参数 (解决你的报错)
+enable_pca_preprocess: true      # 是否在聚类/UMAP前先做一次 PCA
+pca_preprocess_dims: 50          # PCA 降维后的维度 (保留主要特征)
+vis_pca_dims: 50                 # 可视化前的 PCA 维度 (通常与上面一致)
+
+# 兼容旧代码的参数 (防止代码里有残留引用报错)
+kmeans_n_clusters: 5             # 如果回退到 kmeans 需要此参数
+kmeans_k_min: 2
+kmeans_k_max: 50
+tsne_perplexity: 30
+distance_threshold: 0.5
+
+# 少类kde图示
+kde_topk: 3              # 2 或 3；0 表示不生成 KDE 图
+kde_bw: 0.35             # KDE 带宽（越小越“抱团”，越大越平滑）
+kde_grid_res: 220        # 网格分辨率（越大越细，但更慢）
+kde_levels: 12           # 等高线层数
+kde_min_points: 30       # 簇内点数太少就不做 KDE，退化成散点
+kde_scatter_points: 250  # KDE 图上叠加的散点数量（增强可解释性）

@@ -7,8 +7,8 @@ corpus: "sci"
 # 但为了路径解析正常，保留一个名字占位
 corpus_dataset_name: "hicai-zju/SciKnowEval" 
 corpus_dataset_config: null
-corpus_split: "train"
-target_domain: "mcq-4-choices"
+corpus_split: "test"
+
 # 2. 测试集配置
 # 同上，代码会自动生成
 test_dataset_name: "hicai-zju/SciKnowEval"
@@ -29,22 +29,40 @@ target_domain: "Chemistry"
 # RAG 参数 (BEMR 必须)
 retrieval_method: "bm25"
 
+# ----------------------------------------------------
+# 🔥 [重点修改] Prompt 配置
+# ----------------------------------------------------
 prompts:
-  # 科学专家设定
+  # 1. 系统提示词 (用于非 RAG 的直接回答，或者兜底)
+  # 修改逻辑：删掉 Yes/No，强调输出 Option Letter
   sys_msg : |
-    "You are a scientific domain expert. Answer the question concisely. If it is a true-or-false question, then the final answer will be either "Yes" or "No". End your answer with the final judgment or value enclosed in \\boxed{}.For example: \boxed{{Yes}} or \boxed{{No}}."
+    You are a scientific domain expert. 
+    The user will provide a question with options (e.g., A, B, C, D).
+    Analyze the question and select the correct option.
+    
+    IMPORTANT: 
+    - Output ONLY the option letter enclosed in \boxed{{}}.
+    - For example: \boxed{{A}} or \boxed{{B}}.
+    - Do NOT output "Yes", "No", "True", or "False". Only the letter.
   
+  # 2. RAG 系统提示词 (核心)
+  # 修改逻辑：统统归一化为选择题逻辑
   rag_system: |
-        You are a scientific expert. Below are some similar solved problems. Refer to the logic in these examples to solve the new question.
+        You are a scientific expert. Below are some similar solved problems (references). 
+        Refer to the logic in these examples to solve the new question.
         
-        Solve the problem concisely. 
-        If it is a multiple-choice question, analyze the options and select the correct one.
-        If it is a true-or-false question, then the final answer will be either "Yes" or "No"
-        ⚠️ IMPORTANT: You MUST put the final answer within \boxed{{}}. For example: \boxed{{Yes}} or \boxed{{No}}.
+        ### Instructions:
+        1. Read the question and the provided options carefully.
+        2. If it looks like a True/False question, treat "True" as Option A and "False" as Option B.
+        3. Think step by step to derive the correct answer.
+        4. Your final output MUST be the option letter enclosed in \boxed{{}}.
+        
+        ### Format Example:
+        If the answer is Option A, output: \boxed{{A}}
         
         {reference}
         
-        ### Question:
+        ### New Question:
         {question}
         
         ### Answer:

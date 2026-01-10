@@ -1,0 +1,43 @@
+# conf/experiment/math_self.yaml
+# 用途: 使用 MATH 构建记忆库，去测试 HMMT 数据集
+tag: "math_self"
+corpus: "MATH"
+mode: "all" # all, baseline, rag
+problem_type: "Algebra"
+# 1. 记忆库配置 (Corpus)
+corpus_dataset_name: "open-r1/OpenR1-Math-220k"
+corpus_dataset_config: "default"
+corpus_split: "train"
+
+# 2. 测试集配置 (Test)
+test_dataset_name: "open-r1/OpenR1-Math-220k"
+test_dataset_config: "default"
+test_split: "train"
+
+visualize_memory: True
+
+# 字段映射 (两个数据集都兼容 problem/solution)
+field_map:
+  question: "problem"
+  answer: "solution"
+
+# RAG 参数
+retrieval_topk: 3
+retrieval_method: "bm25"
+reward: 2
+punishment: -1
+
+prompts:
+  sys_msg : |
+    "You are a math expert. Solve the problem in a brief. Don't answer more than 50 words.End your answer with \\boxed{number}."
+  
+  rag_system: |
+        You are a math expert. You can solve math problems in one second to give the correct answer. Below are some similar solved problems. Refer to the logic in these examples to solve the new question.
+        Solve the problem in a very brief. Don't answer more than 80 tokens. If the problem is easy, You can also just give the final answer. Do not perform unit conversion.
+        Try to use fractions instead of decimals.
+        ⚠️ IMPORTANT: You MUST put the final answer within \boxed{{}}. For example: \boxed{{10}} or \boxed{{x \in [-1,1]}}.
+        {reference}
+        ### Question:
+        {question}
+        ### Answer:
+        Let's think step by step.

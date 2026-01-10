@@ -54,8 +54,7 @@ def _basic_guard(text: str, *, min_len: int = 20, max_len: int = 2000) -> bool:
 # Default behavior (if cfg is missing): enabled=True, max_retries=2.
 
 _ACCEPTANCE_PROMPT = r'''
-You are a strict evaluator for a RAG memory store.
-
+You are a Cognitive Logic Auditor for a RAG memory store.
 [Failed Queries]
 {failed_queries}
 
@@ -65,17 +64,15 @@ You are a strict evaluator for a RAG memory store.
 [New Memory]
 {new_memory}
 
-[Task]
-Decide whether the NEW memory is more likely than the OLD memory to answer the Failed Queries correctly, without adding hallucinated or unrelated content.
-
-[Rules]
-- If the new memory introduces uncertain facts, mark FAIL.
-- If the new memory is not atomic (mixes multiple unrelated topics), mark FAIL.
-- Prefer concise, query-aligned memories with clear keywords.
+[Audit Criteria]
+1. **Methodology Check**: Does the New Memory explain the *reasoning logic*, *step-by-step derivation*, or *general principle*? (Reject if it just gives the factual answer).
+2. **Generalization**: Is the logic abstract enough to apply to similar problems, not just the specific failed queries?
+3. **Accuracy**: No hallucinations or uncertain facts.
+4. **Atomicity**: Focuses on one core concept/framework.
 
 [Output Format — STRICT]
 Verdict: PASS|FAIL
-Feedback: <1-3 short sentences describing what is still missing or wrong. If PASS, write "OK".>
+Feedback: <If FAIL, explain specifically which logic is missing. If PASS, write "OK".>
 '''
 
 _VERDICT_RE = re.compile(r"Verdict:\s*(PASS|FAIL)", re.IGNORECASE)

@@ -1,7 +1,8 @@
 # conf/optimizer/prime.yaml
 
-top_k_high: 100
-bottom_k_low: 100
+top_k_high: 64
+bottom_k_low: 64
+top_k_evolve: 64
 low_freq_threshold: 1
 top_n_similar: 5
 llm_batch_size: 64
@@ -124,26 +125,32 @@ prompts:
       {neg_queries}
 
       [Your Job]
-      Diagnose why this memory fails for these queries, then choose ONE of the following actions:
+      Act as an Expert Cognitive Analyst. Diagnose why the current memory fails to support the logic required for these queries. Your goal is to enhance the **generalization capability** of the memory bank by identifying missing reasoning frameworks, methodologies, or mental models, rather than simply filling in factual answers.
 
-      - REFINE: The memory is on-topic, but is incomplete/unclear/has minor inaccuracies for these queries.
-      - EXPAND: The memory is on-topic but mixes multiple concepts OR the failed queries require an adjacent concept. Keep the old memory (refine it lightly) AND create one new memory for the missing subtopic.
-      - REPLACE: The memory is off-topic, misleading, or low-quality. Discard it and write a new memory targeted to the failed queries.
+      Choose ONE of the following actions:
+
+      - REFINE: The memory covers the topic but lacks depth in **reasoning logic** or **methodology**. Update it to include the "how-to" or underlying principles.
+      - EXPAND: The memory implies a broader concept but misses a specific **problem-solving paradigm** required by the failed queries. Keep the old memory and create a new, abstract memory for this missing logic/strategy.
+      - REPLACE: The memory is fundamentally misleading or focuses on irrelevant rote facts. Discard it and write a new memory focused on the **core analytical framework** needed for such queries.
 
       [Grounding Rules]
-      - Prefer evidence from the Target Memory and the Failed Queries.
-      - If you add new factual claims, keep them minimal and only include high-confidence, stable facts. Avoid uncertain specifics.
-      - Do NOT include any policy, meta-commentary, or apologies.
+      - **Focus on Logic over Fact:** Do not just add the correct answer. Instead, extract the *generic algorithm*, *inference pattern*, or *step-by-step methodology* used to derive the answer.
+      - **Generalization:** The advice must be applicable to a class of similar problems, not just the specific failed queries.
+      - **Avoid Rote Memorization:** Refrain from directly incorporating specific solutions unless they serve as a canonical example for a rule.
+      - **Evidence:** Base your analysis on the gap between the *current memory's scope* and the *reasoning depth* required by the failed queries.
+      - Do NOT include any meta-commentary or apologies.
 
       [Output Format — STRICT]
       Output EXACTLY the following three lines (no extra text):
 
-      Analysis: \box{{<1 sentence root cause>}}
-      Advice: \advice{{<actionable edit instructions with bullets. Include: (i) what to add/remove; (ii) 3–8 retrieval keywords; (iii) if EXPAND/REPLACE, define the scope of the NEW memory. Keep <=180 words.>}}
+      Analysis: \box{{<Identify the missing **cognitive capability** or **reasoning path** (e.g., "Lacks the derivation logic for X", "Missing the criteria to distinguish A from B"). 1 sentence.>}}
+      Advice: \advice{{<Actionable instructions focusing on **methodology**. Include: (i) abstract principles or logic chains to add; (ii) 3–8 retrieval keywords emphasizing concepts/methods; (iii) if EXPAND/REPLACE, define the scope of the NEW **strategic memory**. Keep <=180 words.>}}
       Action: \box{{REFINE|EXPAND|REPLACE}}
 
+      You can think step by step.
+
     appgrad_low_refine: |
-      You are a Knowledge Editor for a RAG system.
+      You are a Cognitive Knowledge Engineer for a RAG system.
 
       [Original Memory]
       {content}
@@ -152,21 +159,24 @@ prompts:
       {gradient}
 
       [Task]
-      Rewrite the memory so that it is:
-      - Correct, precise, and directly useful for answering the failed queries described in the Expert Advice.
-      - Atomic: focus on ONE concept/topic; remove unrelated content.
-      - Retrieval-friendly: include 3–8 keywords (as a short "Keywords:" line) that match likely user queries.
+      Rewrite the memory to internalize the **reasoning logic** and **methodology** highlighted in the Expert Advice.
+      - **Generalize:** Transform the specific error diagnosis into a universal rule, framework, or step-by-step thinking process applicable to similar future problems.
+      - **Methodology over Fact:** Prioritize explaining *how* to arrive at the solution (derivation, analysis steps) rather than just stating the final fact/answer.
+      - **Atomic:** Focus on ONE core logic chain or concept.
+      - **Retrieval-friendly:** Include 3–8 keywords (as a short "Keywords:" line) focusing on concepts and methods (e.g., "Chain of Thought", "Principle of X") rather than just specific entities.
 
       [Hard Constraints]
-      - Do NOT invent uncertain facts. If something is unclear, rephrase conservatively.
+      - Do NOT simply append the correct answer to the failed query. Use the query only as an example to illustrate the logic.
+      - If the advice implies a procedure, outline it clearly (e.g., "Step 1:...", "Principle:...").
+      - Do NOT invent uncertain facts.
       - Output ONE memory only.
       - Output NOTHING except the memory wrapper.
 
       [Output Format — STRICT]
-      \memory{{<rewritten memory>}}
+      \memory{{<rewritten memory containing the logic/framework>}}
 
     appgrad_low_replace: |
-      You are a Knowledge Editor creating a NEW memory for a RAG system.
+      You are a Cognitive Knowledge Creator for a RAG system.
 
       [Failed Queries]
       {neg_queries}
@@ -175,27 +185,28 @@ prompts:
       {gradient}
 
       [Task]
-      Create ONE brand-new, atomic memory entry that fills the missing knowledge for the failed queries.
-
+      Create ONE brand-new, atomic memory entry that establishes the **missing reasoning framework** or **mental model** identified in the Expert Advice.
+      
       [Guidelines]
-      - Focus on the smallest sufficient scope that answers the failed queries.
-      - Prefer general, stable facts and clear procedures over fragile details.
-      - Add a "Keywords:" line with 3–10 keywords/aliases that help retrieval.
-      - Avoid hallucinations: only include high-confidence statements. If a detail is uncertain, omit it.
+      - **Abstract the Logic:** Do not merely answer the failed queries. Instead, extract the underlying **principle, algorithm, or methodology** required to solve such problems.
+      - **Generalization:** Write for a general class of problems. Treat the {neg_queries} as specific *instances* or *examples* to illustrate the rule, not the sole focus.
+      - **Structure:** Ideally, define the concept first, then outline the logical steps/procedure to apply it.
+      - **Retrieval-friendly:** Add a "Keywords:" line with 3–10 keywords. Include **functional keywords** (e.g., "Analysis", "Calculation Method", "Evaluation Criteria") alongside topic keywords.
+      - **Certainty:** Only include high-confidence methodologies.
 
       [Hard Constraints]
       - Output ONE memory only.
       - Output NOTHING except the memory wrapper.
 
       [Output Format — STRICT]
-      \memory{{<new memory>}}
+      \memory{{<new memory focusing on logic/methodology>}}
 
 
     # 高分记忆处理区
 
     high_grad_expert: |
-      You are a Senior Knowledge Architect optimizing a 'Champion' memory entry.
-      This memory has a high success rate but failed on specific queries.
+      You are a Senior Cognitive Architect optimizing a 'Champion' memory entry.
+      This memory is a strong baseline (high success rate) but fails on specific queries due to limited scope or depth.
 
       [Champion Memory]
       {content}
@@ -204,14 +215,14 @@ prompts:
       {neg_queries}
 
       [Task]
-      Analyze the relationship between the Memory and the Failed Queries. Determine the best strategy:
+      Analyze why the Champion Memory's logic failed to cover these queries. Determine the expansion strategy:
 
-      - IGNORE: The failure is unrelated/noise; no new memory needed.
-      - SUPPLEMENT: The existing memory is broadly correct, but misses a specific edge-case/detail. Create ONE new auxiliary memory that fills the gap.
-      - SPLIT: The champion memory is broadly correct, but misses the specific edge-case/detail from Failed Queries; so propose another one specific memory to contain the information.
+      - IGNORE: The failure is unrelated (noise, out of scope, or user error).
+      - SUPPLEMENT: The query belongs to the **same logical framework** but requires a specific **exception handling** or **nuance**. (e.g., "The rule applies, but with condition X"). The new memory will be a lightweight "patch" or "addendum".
+      - SPLIT: The query represents a **distinct sub-domain** or a **complex scenario** that requires its own dedicated **reasoning methodology**. (e.g., "The general rule is insufficient; use this specific algorithm instead"). The new memory will be a standalone "Specialized Logic".
 
       [Output Format]
-      Provide brief reasoning (1-3 sentences), then output ONE command line:
+      Provide brief reasoning (1-3 sentences) focusing on the *logical gap*, then output ONE command line:
 
       - If IGNORE:
         Reasoning: ...
@@ -219,15 +230,15 @@ prompts:
 
       - If SUPPLEMENT:
         Reasoning: ...
-        Command: \box{{SUPPLEMENT}} \gradient{{<Very specific instructions on what missing detail to write in the new memory>}}
+        Command: \box{{SUPPLEMENT}} \gradient{{<Instructions to define the **exception logic** or **boundary condition**. E.g., "Define the constraint that prevents the general rule from working here.">}}
 
       - If SPLIT:
         Reasoning: ...
-        Command: \box{{SPLIT}}  \gradient{{<Instructions for the new memory">}}
+        Command: \box{{SPLIT}} \gradient{{<Instructions to abstract a **new specialized methodology** for this sub-topic. E.g., "Create a standalone framework specifically for analyzing [Scenario X].">}}
 
     appgrad_high_supplement: |
-      You are a Technical Writer.
-      We have an existing memory that is generally correct but missed some edge cases.
+      You are a Cognitive Knowledge Integrator.
+      We have a "Champion Memory" (high reliability) that needs to be expanded to cover specific edge cases or complex scenarios.
 
       [Existing Memory]
       {original_content}
@@ -236,16 +247,24 @@ prompts:
       {advice}
 
       [Task]
-      Write ONE new memory entry that specifically addresses the missed queries and advice.
-      Do NOT repeat the existing memory content. Focus on the missing details.
-      Output ONLY the new memory content.
+      Create a **Unified Memory Entry** that preserves the original knowledge while appending the new reasoning logic.
+      
+      [Guidelines]
+      1. **Preserve the Core:** Retain the valid information from the [Existing Memory] as the foundation. You may lightly format it for clarity but do not remove key facts.
+      2. **Append the Logic:** Add a distinct section (e.g., "Boundary Analysis", "Exception Handling", or "Advanced Methodology") derived from the [Expert Advice].
+      3. **Focus on Reasoning:** The added section must explain the **logical bridge** or **decision criteria** for the edge case, not just a factual patch.
+      4. **Keywords:** Update the keywords to cover both the general concept and the specific edge case.
 
-      [Format Requirement]
-      Wrap your final memory content strictly in \memory{{...}}.
+      [Output Format — STRICT]
+      Output ONLY one block wrapped in \memory{{...}}.
+      \memory{{
+      <Original content (refined)>
+      <The new methodology/reasoning for the edge case>
+      }}
 
     appgrad_high_split: |
-      You are a Technical Writer.
-      We need to create a new distinct memory entry based on expert's advice.
+      You are a Specialized Knowledge Architect.
+      The Expert has identified that the missed queries belong to a **distinct sub-topic** or **complex scenario** requiring a dedicated memory entry.
 
       [Missed Queries]
       {neg_text}
@@ -254,13 +273,19 @@ prompts:
       {advice}
 
       [Task]
-      Write exactly a separate memory entry.
-      Each entry must be:
-      - Self-contained and accurate
-      - Focused on a distinct sub-topic / failure mode (do NOT overlap heavily)
-      - Directly helpful for answering the missed queries
+      Formulate a standalone **"Specialized Logic"** memory entry.
+      Your goal is to abstract the specific solution to the missed queries into a **reusable methodology** or **concept definition** for this specific sub-domain.
+
+      [Guidelines]
+      1. **Methodology over Instance:** Do not simply record the answer to the missed query. Instead, record the **algorithm, decision tree, or theoretical framework** needed to derive that answer.
+      2. **Define the Scope:** Clearly state *when* this specialized logic applies (e.g., "In high-concurrency environments...", "When the limit approaches zero...").
+      3. **Self-Contained:** The memory must provide enough context to be understood without referencing the parent memory.
+      4. **Generalization:** Ensure the logic is broad enough to handle variations of the failed queries.
 
       [Format Requirement]
-      Output ONLY one block, each wrapped in \memory{{...}}.
-      Do NOT add extra text, numbering, or delimiters outside the \memory{{...}} blocks.
+      Output ONLY one block wrapped in \memory{{...}}.
+      The content should ideally follow a structure: [Scenario Definition] -> [Reasoning Logic/Methodology] -> [Key Constraints].
+
+      [Strict Output]
+      \memory{{<New specialized memory content>}}
 

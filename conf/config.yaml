@@ -1,8 +1,9 @@
 # conf/config.yaml
 defaults:
   - _self_
-  - experiment: gsm8k_self  # 🔥 在这里一键切换数据集！hmmtex math_self sciqa gsm8k_self
-  - optimizer: prime        # 🔥 在这里切换优化策略
+  - experiment:  hmmtex  # 🔥 在这里一键切换数据集！hmmtex math_self sciqa gsm8k_self openr1 aimeex humaneval
+  - optimizer: ability        # 🔥 在这里切换优化策略
+  - cluster: plus
 
 timestamp: "${now:%Y%m%d_%H%M%S}"
 
@@ -42,15 +43,16 @@ paths:
 # ================= 数学常数 =================
 parameters:
   is_first: True
-  total_rounds: 5
+  total_rounds: 2
   resume_path: null # "/root/workspace/jychen/ex/results/20260102_114644_hmmtex_Loop/round_9"
   start_index: 0
   debug_num: null  # 调试时设小一点
 
-  max_retries: 5
+  max_retries: 3
 
+  total_num: 5000
   split_corpus_for_val: True
-  split_ratio: 0.9
+  split_ratio: 0.7
   retrieval_topk: 50
   final_topk: 5
   mode: "rag" # 可选: baseline, rag, all
@@ -62,7 +64,7 @@ model:
   optimize: "sglang"
   hf_name: "Qwen/Qwen3-4B-Instruct-2507"
   device: "cuda"
-  batch_size: 64
+  batch_size: 128
   max_input_len: 8192
   max_new_tokens: 8192
 
@@ -78,19 +80,10 @@ model:
 
 
 expert_model:
-  source: "sglang"
-  name: "Qwen/Qwen3-30B-A3B-Thinking-2507"
+  source: "sglang" # "sglang" "qwen"
+  name: "qwen-max" #"Qwen/Qwen3-30B-A3B-Thinking-2507"
   sglang_api_url: "http://127.0.0.1:30001/v1"
   # sglang_api_url: "http://127.0.0.1:30000/v1"
   # name: "Qwen/Qwen3-4B-Instruct-2507"
   max_new_tokens: 8192
 
-# ================= 聚类配置 (相对稳定) =================
-cluster:
-  method: "agglomerative"
-  distance_threshold: 1.0
-  kmeans_n_clusters: 10
-  vis_method: "tsne"
-  enable_pca_preprocess: True
-  pca_preprocess_dims: 50
-  tsne_perplexity: 40

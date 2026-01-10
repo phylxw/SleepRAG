@@ -6,17 +6,20 @@ from huggingface_hub import snapshot_download
 # Hydra & OmegaConf
 import hydra
 from omegaconf import DictConfig, OmegaConf
-
+import random # [新增] GPQA 打乱选项需要
 # FlashRAG
 from flashrag.config import Config
 from flashrag.pipeline import SequentialPipeline
 from flashrag.utils import get_retriever, get_generator, Dataset
 from flashrag.prompt import PromptTemplate
 
-# 屏蔽 transformers 的冗余警告
+# 屏蔽 transformers 的冗余警告 和 httpx 的 INFO 日志 
 import transformers
 transformers.logging.set_verbosity_error()
 
+#为了代码
+import requests
+import re
 # ==========================================
 # 1. 一波引用
 # ==========================================
@@ -27,10 +30,13 @@ from utils.generator.gemini import GeminiGenerator
 from utils.generator.sglang import SGLangGenerator
 from tools.evaluate import evaluate_results
 from tools.retrieverwrapper import BEMRRetrieverWrapper
+from tools.memoryscore import _load_memory_corpus,_calculate_scores,_print_stats_and_save,_visualize_results
+from tools.evalcode import evaluate_code_results
 # ==========================================
 # 2. 核心功能函数 (Hydra 适配)
 # ==========================================
-from tools.memoryscore import _load_memory_corpus,_calculate_scores,_print_stats_and_save,_visualize_results
+
+
 def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_image_file: str, 
                          old_stats: dict = None, root_dir: str = None, corpus_tag: str = None):
     """
@@ -40,7 +46,7 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
     - root_dir, corpus_tag: 用于构造 stats 文件的保存路径
     """
     # 依然保留旧的 freq_file 用于兼容旧的可视化逻辑，但核心是下面的 stats_file
-    freq_after_file = cfg.paths.freq_after_file
+    freq_file = cfg.paths.freq_file
     print("\n🔍 [Analysis] 正在更新贝叶斯信念状态 (Bayesian Belief Update)...")
 
     # 1. 加载数据
@@ -52,11 +58,11 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
 
     # 3. 🔥 [BEMR 核心] 保存完整的记忆状态 (Stats + Gradients)
     if root_dir and corpus_tag:
-        stats_after_file = cfg.paths.stats_after_file
+        stats_file = cfg.paths.stats_file
         try:
-            with open(stats_after_file, 'w', encoding='utf-8') as f:
+            with open(stats_file, 'w', encoding='utf-8') as f:
                 json.dump(new_stats, f, ensure_ascii=False, indent=2)
-            print(f"💾 [BEMR] 已保存最新的记忆状态 (含 TextGrad 梯度) 至: {stats_after_file}")
+            print(f"💾 [BEMR] 已保存最新的记忆状态 (含 TextGrad 梯度) 至: {stats_file}")
         except Exception as e:
             print(f"⚠️ 保存记忆状态失败: {e}")
 
@@ -67,12 +73,11 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
         id_to_content, 
         len(rag_results), 
         correct_count, 
-        freq_after_file
+        freq_file
     )
 
     # 5. 可视化
     _visualize_results(cfg, sorted_memories, vis_image_file)
-
 # ==========================================
 # 3. 主程序 (Hydra Managed)
 # ==========================================
@@ -90,11 +95,11 @@ def main(cfg: DictConfig):
     # 优先读取 xxx_dataset_name，如果 yaml 里没写，回退到 dataset_name
     
     # 1. 记忆库 Tag (用于命名 corpus 和 index)
-    corpus_name = cfg.experiment.get("corpus_dataset_name") 
+    corpus_name = cfg.experiment.get("corpus_dataset_name") or cfg.experiment.dataset_name
     corpus_tag = corpus_name.split('/')[-1] 
     
     # 2. 测试集 Tag (用于命名 test_data 和 log)
-    test_name = cfg.experiment.get("test_dataset_name") 
+    test_name = cfg.experiment.get("test_dataset_name") or cfg.experiment.dataset_name
     test_tag = test_name.split('/')[-1]
 
     print(f"🏷️  Corpus Tag: {corpus_tag} | Test Tag: {test_tag}")
@@ -104,9 +109,10 @@ def main(cfg: DictConfig):
     # =================================================================
     
     # 记忆库文件 & 索引目录 -> 跟随 corpus_tag (比如 MATH)
-    corpus_file = cfg.paths.optimized_memory
-    index_dir = cfg.paths.index_optimized_dir
+    corpus_file = cfg.paths.corpus_file
+    index_dir = cfg.paths.index_dir
     result_dir = cfg.paths.result_dir
+    
     # 测试集数据文件 -> 跟随 test_tag (比如 hmmt)
     # 这样你就不会把 MATH 的测试集覆盖掉了
     jsonl_dir =  cfg.paths.jsonl
@@ -116,16 +122,17 @@ def main(cfg: DictConfig):
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     # 格式: HMMT_on_MATH_sglang_rag_2025...
     result_log_file = os.path.join(result_dir, f"{test_tag}_on_{corpus_tag}_{cfg.model.source}_{cfg.parameters.mode}_{timestamp}.txt")
-
+    
     # 可视化图片 -> 跟随日志名
     vis_image_file = os.path.join(result_dir, f"{test_tag}_on_{corpus_tag}_dist_{timestamp}.png")
 
     if os.path.exists(result_log_file): os.remove(result_log_file)
     print(f"📝 结果将保存至: {result_log_file}")
-    print(f"🛠️ 模式: {cfg.parameters.mode} | 源: {cfg.model.source} | 数据集: {cfg.experiment.test_dataset_name}")
+    print(f"🛠️ 模式: {cfg.parameters.mode} | 源: {cfg.model.source}")
+    print(f"📚 Memory: {corpus_name} | 🎯 Test: {test_name}")
 
     # 1. 数据准备
-    need_split = cfg.parameters.get("split_corpus_for_val", False)
+    need_split = cfg.parameters.get("split_corpus_for_val", False) 
     if not prepare_data(cfg, corpus_file, test_file,need_split): return
     
     # 2. 索引构建 (如果是 rag 或 all 模式)
@@ -177,15 +184,8 @@ def main(cfg: DictConfig):
             # --- 关键修改 ---
             "device": "cpu",
             "gpu_num": 0,
-            
-            # 1. 告诉 FlashRAG 我们在用类似 OpenAI 的生成协议 (虽然我们实际上是用自定义 Generator 覆盖了它)
-            "generator_model": "openai",   
-            
-            # 2. 🔥🔥🔥 核心修复在这里 🔥🔥🔥
-            # 不要让它去加载 "openai" 的 config，而是去加载 Qwen 的 config！
-            # PromptTemplate 需要这个路径来下载 tokenizer config
+            "generator_model": "openai",               
             "generator_model_path": sglang_model_name, 
-            
             "generation_method": "openai", 
             "batch_size": cfg.model.batch_size,
             "max_input_len": cfg.model.max_input_len,
@@ -246,14 +246,29 @@ def main(cfg: DictConfig):
         print(f"❌ 未支持的 MODEL_SOURCE: {model_source}")
         return
 
-    stats_optimized_file = cfg.paths.stats_optimized_file
+
+    is_code_task = False
+    code_dataset_type = "math" # 默认
+    if "humaneval" in cfg.experiment.tag.lower():
+        is_code_task = True
+        code_dataset_type = "humaneval"
+    elif "mbpp" in cfg.experiment.tag.lower():
+        is_code_task = True
+        code_dataset_type = "mbpp"
+
+    # =================================================================
+    # 🔥 [BEMR Step 1] 加载记忆状态 (Alpha/Beta)
+    # =================================================================
+    # 这个文件记录了每条记忆的“胜率”和“不确定性”
+    stats_file = cfg.paths.stats_file
     memory_stats = {}
-    if os.path.exists(stats_optimized_file):
-        print(f"📈 [BEMR] 加载历史记忆状态: {stats_optimized_file}")
-        with open(stats_optimized_file, 'r', encoding='utf-8') as f:
+    if os.path.exists(stats_file):
+        print(f"📈 [BEMR] 加载历史记忆状态: {stats_file}")
+        with open(stats_file, 'r', encoding='utf-8') as f:
             memory_stats = json.load(f)
     else:
-        print(f"⚠️ [BEMR] 未找到历史状态，将从零开始评估。")
+        print(f"🌱 [BEMR] 未找到历史状态，初始化为空 (所有记忆 Alpha=1, Beta=1)")
+        # 注意：这里不需要手动把所有 ID 填进去，Wrapper 里有默认值处理
 
     # 读取测试数据
     with open(test_file, "r") as f:
@@ -263,25 +278,44 @@ def main(cfg: DictConfig):
     acc_rag = 0
 
     # --- Task A: Baseline ---
-    if cfg.parameters.mode in ['baseline']:
+    if cfg.parameters.mode in ['baseline', 'all']:
         print("\n⚔️ [Task A] 正在运行 Baseline ...")
         
         baseline_inputs = []
         for item in test_dataset_raw:
             sys_msg = cfg.experiment.prompts.sys_msg
-            formatted_prompt = format_base_prompt(sys_msg, item['question'])
+            formatted_prompt = format_base_prompt(sys_msg, item['question'],model_source)
             baseline_inputs.append(formatted_prompt)
 
         baseline_preds = generator.generate(baseline_inputs)
         
-        baseline_results = []
-        for item, pred in zip(test_dataset_raw, baseline_preds):
-            baseline_results.append({
-                "question": item['question'],
-                "golden_answers": item['golden_answers'],
-                "pred": pred
-            })
-        acc_baseline = evaluate_results(baseline_results, "Baseline (No RAG)", result_log_file)
+
+        if is_code_task:
+            baseline_results = []
+            for item, pred in zip(test_dataset_raw, baseline_preds):
+                # 🔥 [修改 1] 必须保留原始 item 的所有字段！
+                # 否则 CodeEvaluator 找不到 test_list 或 prompt
+                res_item = item.copy() 
+                res_item['pred'] = pred
+                baseline_results.append(res_item)
+        # 🔥 调用新的代码评测函数
+        # 注意：这里直接传入 results 对象列表，函数内部会处理批量评测
+            acc_baseline = evaluate_code_results(
+                results=baseline_results, # 这里传入 baseline_results 或 rag_results
+                experiment_name=f"Baseline (No RAG)",
+                result_log_file=result_log_file,
+                dataset_type=code_dataset_type
+            )
+        else:
+            baseline_results = []
+            for item, pred in zip(test_dataset_raw, baseline_preds):
+                baseline_results.append({
+                    "question": item['question'],
+                    "golden_answers": item['golden_answers'],
+                    "pred": pred
+                })
+            # 🧊 调用原有的数学评测函数
+            acc_baseline = evaluate_results(baseline_results, "Baseline (No RAG)", result_log_file)
 
     # --- Task B: FlashRAG ---
     if cfg.parameters.mode in ['rag', 'all']:
@@ -306,38 +340,58 @@ def main(cfg: DictConfig):
         # 重新实例化 Config 以确保 Retriever 能读到正确参数
         rag_config = Config(config_dict=rag_update)
         retriever = get_retriever(rag_config)
-        # 🔥 [关键] 评估时也必须启用 Wrapper，利用 BEMR 分数辅助检索
-        # 即使记忆被优化了，UCB 策略依然能帮助我们平衡探索
-        print("🔧 [BEMR] 启用贝叶斯 UCB 探索策略 (Evaluating)...")
+        print("🔧 [BEMR] 启用贝叶斯 UCB 探索策略...")
         retriever = BEMRRetrieverWrapper(retriever, memory_stats, cfg)
+
         rag_system_part = cfg.experiment.prompts.rag_system
         
         prompt_tpl = PromptTemplate(rag_config, system_prompt=rag_system_part, user_prompt="")
+
         pipeline = SequentialPipeline(rag_config, prompt_template=prompt_tpl, retriever=retriever, generator=generator)
         dataset_obj = Dataset(rag_config, test_file)
         
         rag_results = pipeline.run(dataset_obj)
         
-        acc_rag = evaluate_results(rag_results, f"FlashRAG ({corpus_name} Optimized Memory)", result_log_file)
+        if is_code_task:
+            print("🔄 [Data Merge] 正在将 RAG 预测结果与原始元数据合并...")
+            # 🔥 [核心修复] FlashRAG 结果对象丢失了 prompt/test 字段，必须从原始数据回填
+            # 前提：FlashRAG 输出顺序与输入顺序一致 (SequentialPipeline 保证这点)
+            rag_eval_data = []
+            for raw_item, rag_item in zip(test_dataset_raw, rag_results):
+                # 复制原始数据的所有字段 (prompt, test, entry_point...)
+                merged_item = raw_item.copy()
+                # 注入 RAG 的预测结果
+                merged_item['pred'] = rag_item.pred 
+                rag_eval_data.append(merged_item)
+
+            acc_rag = evaluate_code_results(
+                results=rag_eval_data, # 传合并后的数据
+                experiment_name=f"FlashRAG ({corpus_tag}) - Code",
+                result_log_file=result_log_file,
+                dataset_type=code_dataset_type
+            )
+        else:
+            # 🧊 调用原有的数学评测函数
+            acc_rag = evaluate_results(rag_results, f"FlashRAG ({corpus_tag} Memory)", result_log_file)
+        
         
         # 统计记忆热度 (传入 cfg)
         analyze_memory_usage(rag_results, cfg, corpus_file, vis_image_file, old_stats=memory_stats,root_dir=root_dir,corpus_tag=corpus_tag)
 
     # --- Summary ---
-    if cfg.parameters.mode != 'baseline':
+    if cfg.parameters.mode == 'all':
         summary = (
             f"\n{'='*20} 最终对比结果 {'='*20}\n"
             f"📊 数据集: {cfg.experiment.test_dataset_name}\n"
             f"🤖 模型: {model_source}\n"
             f"📉 Baseline: {acc_baseline:.2f}%\n"
-            f"📈 SleepRAG: {acc_rag:.2f}%\n"
+            f"📈 FlashRAG: {acc_rag:.2f}%\n"
             f"🚀 提升: {acc_rag - acc_baseline:+.2f}%\n"
             f"{'='*50}\n"
         )
         print(summary)
         with open(result_log_file, "a", encoding="utf-8") as f:
             f.write(summary)
-        return summary
 
 if __name__ == "__main__":
     main()

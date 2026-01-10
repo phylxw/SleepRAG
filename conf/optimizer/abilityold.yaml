@@ -1,0 +1,273 @@
+# conf/optimizer/prime.yaml
+
+top_k_high: 100
+bottom_k_low: 256
+low_freq_threshold: 1
+top_n_similar: 5
+llm_batch_size: 128
+
+max_memory_len: 8192
+
+prune:
+  enabled: true
+  verbose: true
+  z: 1.64                 # ~90% one-sided
+  min_cluster_size: 2
+  skip_negative_cluster: true
+  min_obs_best: 6
+  best_lcb_thr: 0.70
+  trash_ucb_thr: 0.35
+  max_prune_per_cluster: 3
+prompts:
+    expand_low_freq: |
+      You are an expert Math Olympiad Coach.
+      [Goal]:
+      this memory can't help our model to solve problems, transform it into a high-quality problem-solving guide.
+      the memory is :
+      {text}
+      There are some high-quality memories from similar problems:
+      {good_examples}
+      Don't write too much and you'd better keep the key word of this question.
+      ⚠️ Output Format:
+      Question: ...
+      Answer: ...
+
+    xxxxx: |
+      You are a xxxx
+      Please comnine the following items
+      MEMORY1_BEGIN
+      {memory_1}
+      MEMORY1_END
+      ...
+      
+    textgrad_correction: |
+      You are optimizing a memory entry for a RAG system.
+      
+      [Original Memory]
+      {content}
+      
+      [Critique / Gradient]
+      This memory was INCORRECTLY retrieved for the following queries:
+      {neg_text}
+      
+      [Positive Guidance]
+      Successful neighboring memories:
+      {good_examples}
+      
+      [Task]
+      Rewrite the memory content to be more SPECIFIC and avoid the errors above.
+      Output ONLY the rewritten content.
+
+    apply_gradient: |
+      You are a Knowledge Editor for a RAG system.
+      Your task is to rewrite the memory based on the Expert's critique.
+
+      [Original Memory]
+      {content}
+
+      [Expert's Critique]
+      {gradient}
+      {momentum_part}
+
+      [Constraints]
+      1. **NO Meta-data**: Do NOT include fields like "Domain:", "Problem Type:", "Reasoning Path:", "Cluster:", "Note:", etc.
+      2. **NO Fluff**: Do NOT write introductions like "This memory helps with..." or "Here is the rewritten memory".
+      3. **Direct Content**: Start directly with the core knowledge (Formulas, Theorems, Key Steps, or Python Code).
+      4. **Latex Format**: Use standard latex for math.
+
+      [Goal]
+      Produce a clean, dense, and "ready-to-retrieve" knowledge snippet.
+
+    gradient_generate: |
+      You are a Senior Knowledge Engineer diagnosing a RAG system memory.
+      [Target Memory]
+      {content}
+
+      [Failure Cases]
+      The system used this memory to answer the following queries but failed:
+      {neg_text}
+
+      [Task: Calculate Gradient]
+      Analyze WHY this memory failed.
+      - Is it missing specific formulas or conditions?
+      - Is it ambiguous?
+      - Is it a "Hubness" problem (irrelevant but high similarity)?
+
+      Provide a concise **Improvement Instruction** (The Gradient).
+      Start with "To fix this, you should..."
+
+
+    gradient_reconstruct: |
+      You are a Knowledge Architect.
+      Here are {k} queries that triggered a retrieval failure:
+      {neg_queries}
+      
+      [Task]
+      Identify the MISSING KNOWLEDGE or COMMON MISCONCEPTION across these queries.
+      Don't analyze them one by one. Summarize the core concept that is needed to answer them all.
+      
+      Output a concise instruction (The Gradient) for a writer to create a new memory entry.
+      Start with: "Create a memory that explains..."
+
+    
+    
+    # 低分记忆处理区（优化版：更稳健的解析、更少幻觉、更强可复现性）
+
+    low_grad_expert: |
+      You are a Reasoning Methodology Expert for an AI Agent.
+      The current memory failed to guide the agent to the correct answer. Your goal is NOT just to correct the specific answer, but to abstract a **generalizable reasoning method** or **problem-solving framework** from this failure.
+
+      [Target Memory (Current Knowledge)]
+      {content}
+
+      [Failed Interactions]
+      The agent used the above memory but failed on these queries:
+      {neg_queries}
+
+      [Analysis Strategy]
+      1. Identify the specific failure pattern (e.g., Logic Trap, Missing Heuristic, Concept Confusion, Calculation Error).
+      2. Determine what **abstract method** or **mental model** would allow the agent to solve not just these specific queries, but *any similar class of problems*.
+
+      [Actions]
+      - REFINE_METHOD: The memory has the right topic but lacks a clear *reasoning path*. Transform it into a "How-to" guide.
+      - EXPAND_LOGIC: The memory misses a crucial conceptual link or inference rule. Keep the context but inject a new *logical bridge*.
+      - REPLACE_FRAMEWORK: The memory is factually dense but procedurally useless. Discard and write a new *strategic framework* for this problem type.
+
+      [Output Format — STRICT]
+      Output EXACTLY three lines:
+
+      Analysis: \box{{<Root cause focusing on missing logic/methodology, not just missing facts>}}
+      Advice: \advice{{<Instructions for the writer. Explicitly ask for: "Define the problem class", "Provide a step-by-step inference procedure", and "Key Principles". Avoid simple fact-dumping.>}}
+      Action: \box{{REFINE_METHOD|EXPAND_LOGIC|REPLACE_FRAMEWORK}}
+
+    appgrad_low_refine: |
+      You are an Abstract Reasoning Synthesizer.
+      Your task is to rewrite a memory entry to upgrade it from a "fact sheet" to a "reasoning guide."
+
+      [Original Memory]
+      {content}
+
+      [Methodological Advice]
+      {gradient}
+
+      [Task]
+      Rewrite the memory to enhance the agent's **generalization ability**.
+      The new memory should teach the agent *how to think* about this specific domain.
+
+      [Content Requirements]
+      1. **Principle-First**: Start with the core governing rule or concept definition.
+      2. **Procedural Steps**: Provide a generalized step-by-step logic flow (e.g., "When encountering X, first check Y, then derive Z").
+      3. **Abstraction**: Ensure the logic applies to the specific failed queries AND similar unseen problems.
+
+      [Hard Constraints]
+      - Output ONLY the memory content wrapped in the tag.
+      - Include a "Keywords:" line with 3-8 tags focusing on concepts/methods.
+
+      [Output Format — STRICT]
+      \memory{{
+      [Problem Domain]: <Scope>
+      [Core Principle]: <The underlying rule/theorem>
+      [Reasoning Framework]:
+      1. <Step 1>
+      2. <Step 2>
+      ...
+      Keywords: <keywords>
+      }}
+
+    appgrad_low_replace: |
+      You are an Abstract Reasoning Synthesizer.
+      We need a brand new memory entry that serves as a **cognitive anchor** for a specific class of problems.
+
+      [Failed Queries]
+      {neg_queries}
+
+      [Methodological Advice]
+      {gradient}
+
+      [Task]
+      Create ONE atomic memory entry that provides a robust solution framework.
+      Do not just list the answers to the failed queries. Instead, describe the **algorithm** or **heuristic** required to derive those answers.
+
+      [Guidelines]
+      - Generalize: If the query asks "What is 2+2?", do not just write "4". Write "Summation is the process of..." (metaphorically speaking).
+      - Structure: Use clear headings like "Definition", "Mechanism", "Inference Rules".
+      - Reliability: Only include high-confidence methodologies.
+
+      [Output Format — STRICT]
+      \memory{{<new methodological memory>}}
+
+
+    # 高分记忆处理区
+
+    high_grad_expert: |
+      You are a Knowledge Graph Architect optimizing a 'Champion' memory.
+      This memory is generally effective but failed on specific edge cases.
+
+      [Champion Memory]
+      {content}
+
+      [Failed Queries]
+      {neg_queries}
+
+      [Task]
+      Analyze why the general logic failed for these specific instances. Choose the best strategy to improve **robustness**:
+
+      - IGNORE: The failure is noise or requires external tools not present in memory.
+      - BRANCH_OUT: The existing logic is correct for the general case, but requires a specific **exception clause** or **nuanced derivation path** for these queries. (Add a sub-logic).
+      - DECOUPLE: The failed queries belong to a seemingly similar but fundamentally different logic path. (Create a separate method).
+
+      [Output Format]
+      Provide brief reasoning, then ONE command:
+
+      - If IGNORE:
+        Reasoning: ...
+        Command: \box{{IGNORE}} \gradient{{None}}
+
+      - If BRANCH_OUT (Supplement):
+        Reasoning: ...
+        Command: \box{{SUPPLEMENT}} \gradient{{<Instruction: Define the specific condition (Edge Case) and the modified reasoning steps needed for it.>}}
+
+      - If DECOUPLE (Split):
+        Reasoning: ...
+        Command: \box{{SPLIT}} \gradient{{<Instruction: Define the distinct problem scope and its unique reasoning logic.>}}
+
+    appgrad_high_supplement: |
+      You are a Logic Refinement Specialist.
+      We have a strong memory model that needs an **exception handler** or a **nuance extension**.
+
+      [Existing Memory]
+      {original_content}
+
+      [Expert Advice]
+      {advice}
+
+      [Task]
+      Write ONE new memory entry that acts as a "Patch" to the existing logic.
+      - Explicitly state the **Condition** under which this new logic applies.
+      - Provide the **Modified Inference Steps** for this condition.
+      - Do NOT repeat the general rules from the existing memory.
+
+      [Output Format]
+      \memory{{
+      [Condition]: <When to apply this logic>
+      [Refined Logic]: <The specific reasoning steps for this edge case>
+      }}
+
+    appgrad_high_split: |
+      You are a Logic Refinement Specialist.
+      We need to distill a distinct problem-solving module based on expert advice.
+
+      [Missed Queries]
+      {neg_text}
+
+      [Expert Advice]
+      {advice}
+
+      [Task]
+      Write a self-contained memory entry.
+      - It must represent a **distinct reasoning path** separate from the original memory.
+      - Focus on the *method* of solving these missed queries, not just the answer.
+
+      [Output Format]
+      Output ONLY one block wrapped in \memory{{...}}.
+

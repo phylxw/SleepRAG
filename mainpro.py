@@ -197,6 +197,8 @@ def main(cfg: DictConfig):
             # 1. 定义基础参数 (无论冷启动还是续训都需要)
             pre_overrides = {
                 "paths.stats_file": curr_paths['stats'],
+                "paths.optimized_memory": curr_paths['corpus'],
+                "paths.stats_optimized_file": curr_paths['stats'],
                 "paths.freq_file": curr_paths['freq'], 
                 "paths.corpus_file": curr_paths['corpus'],
                 "paths.test_file": curr_paths['test'],
@@ -211,7 +213,7 @@ def main(cfg: DictConfig):
                 # 🔥 [关键修复] 只有在 Resume 时，才强制指定 optimized_memory 为当前拷贝过来的 corpus
                 # 这样 evallast 就会测试我们从上一轮继承过来的记忆
                 eval_overrides = {
-                    "paths.corpus_file": curr_paths['corpus'],
+                    "paths.optimized_memory": curr_paths['corpus'],
                     "paths.stats_optimized_file": curr_paths['stats'],
                     "paths.stats_after_file": curr_paths['stats_after'],
                     "paths.freq_after_file": curr_paths['freq_after'],
@@ -244,7 +246,7 @@ def main(cfg: DictConfig):
             "paths.stats_file": input_stats,
             "paths.freq_file": input_freq
         }
-        run_step("clusterpro.py", f"R{r}-2. 聚类", cluster_overrides, env=client_env)
+        run_step("clusterultra.py", f"R{r}-2. 聚类", cluster_overrides, env=client_env)
 
         # --------------------------------------------------
         # Step 3: Optimizer
@@ -259,12 +261,12 @@ def main(cfg: DictConfig):
             "paths.stats_optimized_file": curr_paths['stats_optimized'], 
         }
         # run_step("optimizerXtreme.py", f"R{r}-3. 记忆优化", opt_overrides, env=client_env)
-        run_step("optimizerY.py", f"R{r}-3. 记忆优化", opt_overrides, env=client_env)
+        run_step("optimizerZ.py", f"R{r}-3. 记忆优化", opt_overrides, env=client_env)
         # --------------------------------------------------
         # Step 4: Eval
         # --------------------------------------------------
         eval_overrides = {
-            "paths.corpus_file": curr_paths['optimized_memory'],
+            "paths.optimized_memory": curr_paths['optimized_memory'],
             "paths.stats_optimized_file": curr_paths['stats_optimized'],
             "paths.stats_after_file": curr_paths['stats_after'],
             "paths.freq_after_file": curr_paths['freq_after'],

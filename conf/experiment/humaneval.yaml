@@ -1,0 +1,74 @@
+# conf/experiment/humaneval.yaml
+# 用途: 使用 MBPP 构建代码记忆库，去测试 HumanEval 代码生成能力
+tag: "humaneval"
+corpus: "mbpp" 
+mode: "rag" 
+
+# ==========================================
+# 1. 记忆库配置 (Corpus)
+# ==========================================
+# 强烈建议: 代码任务的检索源也应该是代码。
+# 这里我们使用 MBPP (sanitized) 的训练集作为"参考书"
+corpus_dataset_name: "google-research-datasets/mbpp"
+corpus_dataset_config: "sanitized"
+corpus_split: "test" 
+
+# ==========================================
+# 2. 测试集配置 (Test)
+# ==========================================
+# 🔥 [关键] 名字里必须带 "humaneval"，触发 pre.py 的代码评测逻辑
+test_dataset_name: "openai/openai_humaneval"
+test_dataset_config: null
+test_split: "test" # HumanEval 只有 test 集
+
+visualize_memory: True
+
+# ==========================================
+# 3. 字段映射 (Field Map)
+# ==========================================
+# 针对 MBPP (Corpus) 的字段映射
+# MBPP 的结构是: text (问题), code (答案), test_list (测试用例)
+field_map:
+  question: "text"  # 把 MBPP 的 'text' 字段当作问题存入索引
+  answer: "code"    # 把 MBPP 的 'code' 字段当作答案
+
+retrieval_method: "bm25"
+
+# ==========================================
+# 4. Prompt 设置 (针对 Python 生成优化)
+# ==========================================
+prompts:
+  # System Message: 设定专家身份，强调用 Markdown 包裹代码
+  sys_msg: |
+    You are an expert Python programmer. 
+    Complete the function provided in the prompt.
+    
+    IMPORTANT format rules:
+    1. You must output the code in a markdown block: ```python ... ```
+    2. Do not explain anything unless necessary. Just write the code.
+
+  # RAG System Prompt: 注入检索到的代码片段
+  rag_system: |
+    <|im_start|>system
+    You are an expert Python programmer.
+
+    I have retrieved some similar programming problems and their solutions to help you.
+    Study how they implement logic and handle edge cases, then solve the NEW problem independently.
+
+    [RETRIEVED REFERENCES]
+    <references>
+    {reference}
+    </references>
+
+    [INSTRUCTIONS]
+    1. Read the function signature and docstring in the user prompt carefully.
+    2. Implement the function body.
+    3. CRITICAL: You MUST enclose your code in a markdown block like this:
+    ```python
+    # Your code here
+    ```
+    <|im_end|>
+    <|im_start|>user
+    {question}
+    <|im_end|>
+    <|im_start|>assistant

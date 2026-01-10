@@ -22,6 +22,7 @@ transformers.logging.set_verbosity_error()
 # ==========================================
 from utils.prepare_data import prepare_data
 from utils.build_index import build_index
+from utils.toolfunction import format_base_prompt
 from utils.generator.gemini import GeminiGenerator
 from utils.generator.sglang import SGLangGenerator
 from tools.evaluate import evaluate_results
@@ -30,6 +31,8 @@ from tools.retrieverwrapper import BEMRRetrieverWrapper
 # 2. 核心功能函数 (Hydra 适配)
 # ==========================================
 from tools.memoryscore import _load_memory_corpus,_calculate_scores,_print_stats_and_save,_visualize_results
+from tools.prepare.humaneval_split import prepare_humaneval
+
 def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_image_file: str, 
                          old_stats: dict = None, root_dir: str = None, corpus_tag: str = None):
     """
@@ -254,13 +257,6 @@ def evallast(cfg: DictConfig):
     acc_rag = 0
 
     # 格式化 Prompt 辅助函数
-    def format_base_prompt(system_text, user_text):
-        if model_source == "gemini":
-            return f"{system_text}\n\n{user_text}" if system_text else user_text
-        prompt = ""
-        if system_text: prompt += f"{system_text}\n\n"
-        prompt += f"### Question:\n{user_text}\n\n### Answer:\nLet's think step by step."
-        return prompt
 
     # --- Task A: Baseline ---
     if (cfg.parameters.mode in ['baseline']) or is_first:
@@ -268,8 +264,8 @@ def evallast(cfg: DictConfig):
         
         baseline_inputs = []
         for item in test_dataset_raw:
-            sys_msg = "You are a math expert. Solve the problem in a brief. Don't answer more than 50 words.End your answer with \\boxed{number}."
-            formatted_prompt = format_base_prompt(sys_msg, item['question'])
+            sys_msg = cfg.experiment.prompts.sys_msg
+            formatted_prompt = format_base_prompt(sys_msg, item['question'],model_source)
             baseline_inputs.append(formatted_prompt)
 
         baseline_preds = generator.generate(baseline_inputs)

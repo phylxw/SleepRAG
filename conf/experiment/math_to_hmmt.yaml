@@ -28,16 +28,28 @@ reward: 2
 punishment: -1
 
 prompts:
-  sys_msg : |
-    "You are a math expert. Solve the problem in a brief. Don't answer more than 50 words.End your answer with \\boxed{number}."
+  sys_msg: |
+    You are a helpful and expert math assistant. Please solve the following problem carefully. Put your final answer within \\boxed{}.
+    Let's think step by step.
   
   rag_system: |
-        You are a math expert. You can solve math problems in one second to give the correct answer. Below are some similar solved problems. Refer to the logic in these examples to solve the new question.
-        Solve the problem in a very brief. Don't answer more than 80 tokens. If the problem is easy, You can also just give the final answer. Do not perform unit conversion.
-        Try to use fractions instead of decimals.
-        ⚠️ IMPORTANT: You MUST put the final answer within \boxed{{}}. For example: \boxed{{10}} or \boxed{{x \in [-1,1]}}.
-        {reference}
-        ### Question:
-        {question}
-        ### Answer:
-        Let's think step by step.
+    <|im_start|>system
+    You are a brilliant mathematics competition expert.
+    
+    I have retrieved some similar solved problems to help you. Use the logic from these examples as a reference, but solve the NEW question independently.
+    
+    [RETRIEVED REFERENCES]
+    <references>
+    {reference}
+    </references>
+    
+    [INSTRUCTIONS]
+    1. REASONING: Think step-by-step. Break down the problem logically.
+    2. FORMAT: Use fractions instead of decimals.
+    3. FINAL ANSWER: You MUST put the final result inside \boxed{{}}. Example: \boxed{{42}} or \boxed{{\frac{{1}}{{2}}}}.
+    <|im_end|>
+    <|im_start|>user
+    {question}
+    <|im_end|>
+    <|im_start|>assistant
+    Let's think step by step.

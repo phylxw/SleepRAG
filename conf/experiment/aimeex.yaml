@@ -1,6 +1,6 @@
-# conf/experiment/hmmtex.yaml
-# 用途: 使用 MATH 构建记忆库，去测试合并后的 HMMT 历年真题集
-tag: "hmmtex"
+# conf/experiment/aimeex.yaml
+# 用途: 使用 MATH 构建记忆库，去测试合并后的 AIME 历年真题集
+tag: "aimeex"
 corpus: "MATH"
 mode: "rag" # 建议设为 'rag' 或 'all' 才能看到优化效果，设为 'baseline' 不会用优化后的记忆
 
@@ -14,7 +14,7 @@ corpus_split: "train"
 # 🔥 [关键修改] 改为指向我们刚刚手动生成的合并数据集
 # 注意：这里我们用 "Custom/" 前缀来触发我们脚本里的特殊处理逻辑
 # 实际上会去读取 root 目录下的 hmmt_merged_test_data.jsonl
-test_dataset_name: "Custom/hmmt_merged" 
+test_dataset_name: "Custom/aime_merged" 
 test_dataset_config: null
 test_split: "test" # 通常评估用 test split
 
@@ -38,7 +38,7 @@ prompts:
     <|im_start|>system
     You are a brilliant mathematics competition expert.
     
-    I have retrieved some similar solved problems to help you. Use the logic from these examples as a reference, but solve the NEW question independently.
+    I have retrieved some similar solved problems to help you. Use the logic from these examples just as a reference, solve the NEW question independently.
     
     [RETRIEVED REFERENCES]
     <references>

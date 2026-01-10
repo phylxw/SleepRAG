@@ -83,11 +83,11 @@ def _basic_guard(text: str, *, min_len: int = 20, max_len: int = 2000) -> bool:
 # ------------------------------------------------------------------------------
 # Acceptance test (for high-score evolve candidates)
 # ------------------------------------------------------------------------------
-
 _EVOLVE_ACCEPT_PROMPT = r'''
-You are a strict evaluator for adding NEW memories to a RAG memory store.
+You are a Cognitive Logic Auditor for a RAG system.
+Your goal is to reject memories that are mere "fact patches" and accept memories that provide "generalized reasoning frameworks."
 
-[Failed Queries] (optional; may be empty)
+[Failed Queries]
 {failed_queries}
 
 [Parent Memory]
@@ -96,12 +96,15 @@ You are a strict evaluator for adding NEW memories to a RAG memory store.
 [Candidate New Memory]
 {new_memory}
 
-[Task]
-Decide whether the Candidate New Memory is (1) relevant, (2) atomic, and (3) likely to improve answers for the Failed Queries without introducing hallucinations or redundant fluff.
+[Audit Criteria]
+1. **Methodology over Answer**: Does the Candidate Memory explain the *how* and *why* (logic, steps, principles) rather than just giving the answer?
+2. **Generalization**: Is the logic abstract enough to handle similar future problems, not just the specific failed queries?
+3. **Atomic & Clear**: Is it a single, self-contained concept? (For SUPPLEMENT/SPLIT, it must be robust).
+4. **Safety**: No hallucinations or unsure facts.
 
 [Output Format - STRICT]
 Verdict: PASS|FAIL
-Feedback: <If FAIL, 1-2 short sentences. If PASS, write "OK".>
+Feedback: <If FAIL, explain specifically which logic is missing or if it's too specific to the query. If PASS, write "OK".>
 '''
 
 _EVOLVE_VERDICT_RE = re.compile(r"Verdict:\s*(PASS|FAIL)", re.IGNORECASE)

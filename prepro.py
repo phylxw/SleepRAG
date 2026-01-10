@@ -22,6 +22,7 @@ transformers.logging.set_verbosity_error()
 # ==========================================
 from utils.prepare_data import prepare_data
 from utils.build_index import build_index
+from utils.toolfunction import format_base_prompt
 from utils.generator.gemini import GeminiGenerator
 from utils.generator.sglang import SGLangGenerator
 from tools.evaluate import evaluate_results
@@ -263,15 +264,6 @@ def main(cfg: DictConfig):
     acc_baseline = 0
     acc_rag = 0
 
-    # 格式化 Prompt 辅助函数
-    def format_base_prompt(system_text, user_text):
-        if model_source == "gemini":
-            return f"{system_text}\n\n{user_text}" if system_text else user_text
-        prompt = ""
-        if system_text: prompt += f"{system_text}\n\n"
-        prompt += f"### Question:\n{user_text}\n\n### Answer:\nLet's think step by step."
-        return prompt
-
     # --- Task A: Baseline ---
     if cfg.parameters.mode in ['baseline', 'all']:
         print("\n⚔️ [Task A] 正在运行 Baseline ...")
@@ -279,7 +271,7 @@ def main(cfg: DictConfig):
         baseline_inputs = []
         for item in test_dataset_raw:
             sys_msg = cfg.experiment.prompts.sys_msg
-            formatted_prompt = format_base_prompt(sys_msg, item['question'])
+            formatted_prompt = format_base_prompt(sys_msg, item['question'],model_source)
             baseline_inputs.append(formatted_prompt)
 
         baseline_preds = generator.generate(baseline_inputs)

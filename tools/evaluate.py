@@ -3,6 +3,7 @@ import os
 import re
 import json
 from utils.math_reward import last_boxed_only_string, remove_boxed
+
 def extract_solution(solution_str):
     return remove_boxed(last_boxed_only_string(solution_str))
 from math_verify import parse, verify
