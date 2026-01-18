@@ -1,7 +1,7 @@
 # conf/config.yaml
 defaults:
   - _self_
-  - experiment:  hmmtex  # 🔥 在这里一键切换数据集！hmmtex math_self sciqa gsm8k_self openr1 aimeex humaneval
+  - experiment:  aimeex # 🔥 在这里一键切换数据集！hmmtex math_self sciqa gsm8k_self openr1 aimeex humaneval mbpp
   - optimizer: ability        # 🔥 在这里切换优化策略
   - cluster: plus
 
@@ -9,12 +9,18 @@ timestamp: "${now:%Y%m%d_%H%M%S}"
 
 # ================= 路径配置 =================
 paths:
+  # root: "/root/workspace/jychen/ex"
+  # index: "${paths.root}/index"
+  # jsonl: "${paths.root}/outputs/jsonl"
+  # json: "${paths.root}/outputs/json"
+  # png: "${paths.root}/outputs/png"
+  # txt: "${paths.root}/outputs/txt"
   root: "/root/workspace/jychen/ex"
   index: "${paths.root}/index"
-  jsonl: "${paths.root}/outputs/jsonl"
-  json: "${paths.root}/outputs/json"
-  png: "${paths.root}/outputs/png"
-  txt: "${paths.root}/outputs/txt"
+  jsonl: "${paths.root}/collects/${experiment.tag}/jsonl"
+  json: "${paths.root}/collects/${experiment.tag}/json"
+  png: "${paths.root}/collects/${experiment.tag}/png"
+  txt: "${paths.root}/collects/${experiment.tag}/txt"
 
   corpus_file: "${paths.jsonl}/${experiment.corpus}_corpus.jsonl"
   index_dir: "${paths.index}/${experiment.corpus}_bm25_index"
@@ -38,6 +44,7 @@ paths:
   vis_image_file: "${paths.png}/${experiment.tag}_on_${experiment.corpus}_dist_${timestamp}.png"
   rag_cache_dir: "${paths.root}/rag_result_cache"
 
+  textgrad_log: "${paths.txt}/${experiment.tag}_textgrad_optimization_log_${timestamp}.txt"
   lowfreq_textgrad_log: "${paths.txt}/lowfreq_textgrad_optimization_log_${timestamp}.txt"
   highfreq_textgrad_log: "${paths.txt}/highfreq_textgrad_optimization_log_${timestamp}.txt"
 # ================= 数学常数 =================
@@ -55,9 +62,11 @@ parameters:
   split_ratio: 0.7
   retrieval_topk: 50
   final_topk: 5
-  mode: "rag" # 可选: baseline, rag, all
+  mode: "all" # 可选: baseline, rag, all
   bemr_lambda1: 1.0  # 历史效用权重
   bemr_lambda2: 0.5  # 探索/不确定性权重 (调大此值可保护低频记忆)
+
+  INIT_VAL: 0.5
 # ================= 模型配置 =================
 model:
   source: "sglang" 
@@ -71,18 +80,18 @@ model:
   gemini_name: "gemini-2.5-flash"
 
   # sglang_api_url: "http://127.0.0.1:30000/v1"
-  # sglang_model_name: "Qwen/Qwen3-4B-Instruct-2507"
+  sglang_model_name: "Qwen/Qwen3-4B-Instruct-2507"
   
-  sglang_model_name: "Qwen/Qwen3-30B-A3B-Thinking-2507" 
-  sglang_api_url: "http://127.0.0.1:30001/v1"
+  # sglang_model_name: "Qwen/Qwen3-30B-A3B-Thinking-2507" 
+  sglang_api_url: "http://127.0.0.1:30002/v1"
 
   embedding_name: "BAAI/bge-large-en-v1.5"
 
 
 expert_model:
-  source: "sglang" # "sglang" "qwen"
+  source: "qwen" # "sglang" "qwen"
   name: "qwen-max" #"Qwen/Qwen3-30B-A3B-Thinking-2507"
-  sglang_api_url: "http://127.0.0.1:30001/v1"
+  sglang_api_url: "http://127.0.0.1:30002/v1"
   # sglang_api_url: "http://127.0.0.1:30000/v1"
   # name: "Qwen/Qwen3-4B-Instruct-2507"
   max_new_tokens: 8192

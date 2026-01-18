@@ -1,6 +1,5 @@
 import os
 import json
-from typing import Dict, List
 import hydra
 from omegaconf import DictConfig
 import logging
@@ -10,8 +9,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # 假设你的文件结构如下，请确保 import 路径正确
-from tools.optimize.callllm import init_llm, call_llm_batch
-from tools.optimize.callexpert import init_expert_llm, call_expert, call_expert_batch
+from tools.optimize.callllm import init_llm
+from tools.optimize.callexpert import init_expert_llm
 from tools.optimize.memoryload import load_clustered_memories, load_cluster_summary
 from optimize.selector import select_ids_from_stats
 from optimize.prune import prune
@@ -28,18 +27,30 @@ def optimize_memory(cfg: DictConfig):
     init_expert_llm(cfg)   # 专家 (Gemini/GPT4)
 
     # 1. 路径配置
-    cluster_file = cfg.paths.cluster_output
-    summary_file = cfg.paths.cluster_summary
-    stats_file = cfg.paths.stats_file
-    output_file = cfg.paths.optimized_memory
-    stats_optimized_file = cfg.paths.stats_optimized_file
-    log_file_path = cfg.paths.textgrad_log
+    # cluster_file = cfg.paths.cluster_output
+    # summary_file = cfg.paths.cluster_summary
+    # stats_file = cfg.paths.stats_file
+    # output_file = cfg.paths.optimized_memory
+    # stats_optimized_file = cfg.paths.stats_optimized_file
+    # log_file_path = cfg.paths.textgrad_log
+
+    # 测试配置 
+    cluster_file = "testdata/cluster_output.jsonl"
+    summary_file = "testdata/cluster_summary.jsonl"
+    stats_file = "testdata/stats.json"
+
+    output_file = "testdata/outputs/optimized_memory.jsonl"
+    stats_optimized_file = "testdata/outputs/stats_optimized_file.json"
+
+    log_file_path = "testdata/outputs/textgrad_log.txt"
+
 
     # 2. 加载数据
     if not os.path.exists(stats_file):
         print(f"❌ 找不到状态文件: {stats_file}")
         return
     with open(stats_file, 'r', encoding='utf-8') as f:
+        print(f"加载状态文件路径: {stats_file}")
         memory_stats = json.load(f)
 
     # memories: dict, id_order: list (旧的顺序)

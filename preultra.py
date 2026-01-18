@@ -6,7 +6,7 @@ from huggingface_hub import snapshot_download
 # Hydra & OmegaConf
 import hydra
 from omegaconf import DictConfig, OmegaConf
-import random # [新增] GPQA 打乱选项需要
+
 # FlashRAG
 from flashrag.config import Config
 from flashrag.pipeline import SequentialPipeline
@@ -17,9 +17,6 @@ from flashrag.prompt import PromptTemplate
 import transformers
 transformers.logging.set_verbosity_error()
 
-#为了代码
-import requests
-import re
 # ==========================================
 # 1. 一波引用
 # ==========================================
@@ -32,13 +29,15 @@ from tools.evaluate import evaluate_results
 from tools.retrieverwrapper import BEMRRetrieverWrapper
 from tools.memoryscore import _load_memory_corpus,_calculate_scores,_print_stats_and_save,_visualize_results
 from tools.evalcode import evaluate_code_results
+
+from clusterultra import cluster
 # ==========================================
 # 2. 核心功能函数 (Hydra 适配)
 # ==========================================
 
 
 def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_image_file: str, 
-                         old_stats: dict = None, root_dir: str = None, corpus_tag: str = None):
+                         old_stats: dict = None, baseline_score = None ,root_dir: str = None, corpus_tag: str = None):
     """
     记忆热度/效用统计与导出 - 主入口
     [新增参数]:
@@ -54,7 +53,7 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
 
     # 2. 计算分数 (传入 old_stats)
     # 注意：这里接收了 new_stats (完整的字典)
-    memory_scores, new_stats, correct_count = _calculate_scores(rag_results, all_memory_ids, cfg, old_stats)
+    memory_scores, new_stats, correct_count = _calculate_scores(rag_results, all_memory_ids, cfg, old_stats,baseline_score)
 
     # 3. 🔥 [BEMR 核心] 保存完整的记忆状态 (Stats + Gradients)
     if root_dir and corpus_tag:
@@ -276,6 +275,7 @@ def main(cfg: DictConfig):
 
     acc_baseline = 0
     acc_rag = 0
+    baseline_score = []
 
     # --- Task A: Baseline ---
     if cfg.parameters.mode in ['baseline', 'all']:
@@ -300,7 +300,7 @@ def main(cfg: DictConfig):
                 baseline_results.append(res_item)
         # 🔥 调用新的代码评测函数
         # 注意：这里直接传入 results 对象列表，函数内部会处理批量评测
-            acc_baseline = evaluate_code_results(
+            acc_baseline,baseline_score  = evaluate_code_results(
                 results=baseline_results, # 这里传入 baseline_results 或 rag_results
                 experiment_name=f"Baseline (No RAG)",
                 result_log_file=result_log_file,
@@ -315,7 +315,7 @@ def main(cfg: DictConfig):
                     "pred": pred
                 })
             # 🧊 调用原有的数学评测函数
-            acc_baseline = evaluate_results(baseline_results, "Baseline (No RAG)", result_log_file)
+            acc_baseline,baseline_score = evaluate_results(baseline_results, "Baseline (No RAG)", result_log_file)
 
     # --- Task B: FlashRAG ---
     if cfg.parameters.mode in ['rag', 'all']:
@@ -364,19 +364,27 @@ def main(cfg: DictConfig):
                 merged_item['pred'] = rag_item.pred 
                 rag_eval_data.append(merged_item)
 
-            acc_rag = evaluate_code_results(
-                results=rag_eval_data, # 传合并后的数据
+            # 2. 🔥 运行代码评测，并获取 scores 列表
+            acc_rag, scores_list = evaluate_code_results(
+                results=rag_eval_data, 
                 experiment_name=f"FlashRAG ({corpus_tag}) - Code",
                 result_log_file=result_log_file,
                 dataset_type=code_dataset_type
             )
+            
+            # 3. 🔥🔥 [核心修复] 将分数注入回 rag_results 对象中！
+            # 只有做了这一步，后面的 analyze_memory_usage 才能读到 item.score
+            print(f"💉 [Inject] 正在将 {len(scores_list)} 个评测分数注入 RAG 结果对象...")
+            for i, item in enumerate(rag_results):
+                # 动态赋值，供 memoryscore.py 使用
+                item.score = scores_list[i]
         else:
             # 🧊 调用原有的数学评测函数
-            acc_rag = evaluate_results(rag_results, f"FlashRAG ({corpus_tag} Memory)", result_log_file)
+            acc_rag,_ = evaluate_results(rag_results, f"FlashRAG ({corpus_tag} Memory)", result_log_file)
         
         
         # 统计记忆热度 (传入 cfg)
-        analyze_memory_usage(rag_results, cfg, corpus_file, vis_image_file, old_stats=memory_stats,root_dir=root_dir,corpus_tag=corpus_tag)
+        analyze_memory_usage(rag_results, cfg, corpus_file, vis_image_file, old_stats=memory_stats,baseline_score = baseline_score,root_dir=root_dir,corpus_tag=corpus_tag)
 
     # --- Summary ---
     if cfg.parameters.mode == 'all':

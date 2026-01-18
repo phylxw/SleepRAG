@@ -7,105 +7,15 @@ from omegaconf import DictConfig
 # Tooling
 from tools.optimize.callllm import call_llm_batch
 from tools.optimize.callexpert import call_expert_batch
-from utils.memorywrap import parse_memory
+from utils.opt.toolfunction import _extract_memory_blocks,_basic_guard
 
-_MEMORY_START = r"\\memory{"
+import re
+from typing import List, Tuple
 
-def _find_memory_spans(raw_output: str) -> List[Tuple[int, int, str]]:
-    """Return list of (start_idx, end_idx_exclusive, inner_text) for each \\memory{...} block.
-    Uses brace-depth counting so it won't break on nested braces (e.g., LaTeX \\frac{1}{2}).
-    """
-    if not raw_output:
-        return []
-    spans: List[Tuple[int, int, str]] = []
-    i = 0
-    n = len(raw_output)
-    while i < n:
-        j = raw_output.find(_MEMORY_START, i)
-        if j < 0:
-            break
-        k = j + len(_MEMORY_START)
-        depth = 1
-        inner_chars: List[str] = []
-        prev = ""
-        while k < n and depth > 0:
-            ch = raw_output[k]
-            # Treat escaped braces (\\{, \\}) as literals w.r.t. depth
-            if ch == "{" and prev != "\\":
-                depth += 1
-            elif ch == "}" and prev != "\\":
-                depth -= 1
-                if depth == 0:
-                    k += 1  # include closing brace
-                    break
-            if depth > 0:
-                inner_chars.append(ch)
-            prev = ch
-            k += 1
-        inner = "".join(inner_chars).strip()
-        spans.append((j, k, inner))
-        i = max(k, j + 1)
-    return spans
-
-def _extract_memory_blocks(raw_output: str) -> List[str]:
-    """Extract one or more memory blocks from raw model output.
-
-    Returns a list of *contents* (without the wrapper). Falls back to parse_memory
-    if no blocks are found.
-    """
-    spans = _find_memory_spans(raw_output or "")
-    blocks = [s[2].strip() for s in spans if s[2] and s[2].strip()]
-    if blocks:
-        return blocks
-    # Fallback: legacy parser (usually returns a single block)
-    single = (parse_memory(raw_output) or "").strip()
-    return [single] if single else []
-
-def _basic_guard(text: str, *, min_len: int = 20, max_len: int = 2000) -> bool:
-    if not text:
-        return False
-    t = text.strip()
-    if len(t) < min_len or len(t) > max_len:
-        return False
-    banned = [
-        "As an AI",
-        "As a language model",
-        "I can't",
-        "I cannot",
-        "I am unable",
-        "抱歉",
-        "无法",
-    ]
-    if any(b in t for b in banned):
-        return False
-    return True
 
 # ------------------------------------------------------------------------------
 # Acceptance test (for high-score evolve candidates)
 # ------------------------------------------------------------------------------
-_EVOLVE_ACCEPT_PROMPT = r'''
-You are a Cognitive Logic Auditor for a RAG system.
-Your goal is to reject memories that are mere "fact patches" and accept memories that provide "generalized reasoning frameworks."
-
-[Failed Queries]
-{failed_queries}
-
-[Parent Memory]
-{old_memory}
-
-[Candidate New Memory]
-{new_memory}
-
-[Audit Criteria]
-1. **Methodology over Answer**: Does the Candidate Memory explain the *how* and *why* (logic, steps, principles) rather than just giving the answer?
-2. **Generalization**: Is the logic abstract enough to handle similar future problems, not just the specific failed queries?
-3. **Atomic & Clear**: Is it a single, self-contained concept? (For SUPPLEMENT/SPLIT, it must be robust).
-4. **Safety**: No hallucinations or unsure facts.
-
-[Output Format - STRICT]
-Verdict: PASS|FAIL
-Feedback: <If FAIL, explain specifically which logic is missing or if it's too specific to the query. If PASS, write "OK".>
-'''
 
 _EVOLVE_VERDICT_RE = re.compile(r"Verdict:\s*(PASS|FAIL)", re.IGNORECASE)
 _EVOLVE_FEEDBACK_RE = re.compile(r"Feedback:\s*(.*)", re.IGNORECASE | re.DOTALL)
@@ -124,10 +34,10 @@ def _evolve_parse_acceptance(output: str):
 def _evolve_acceptance_batch(cfg, items):
     prompts = []
     for it in items:
-        prompts.append(_EVOLVE_ACCEPT_PROMPT.format(
-            failed_queries=(it.get("failed_queries","") or "").strip(),
-            old_memory=(it.get("old_memory","") or "").strip(),
-            new_memory=(it.get("new_memory","") or "").strip(),
+        prompts.append(cfg.optimizer.prompts.expert_judge.format(
+            failed=(it.get("failed_queries","") or "").strip(),
+            old=(it.get("old_memory","") or "").strip(),
+            new=(it.get("new_memory","") or "").strip(),
         ))
     if not prompts:
         return []
@@ -168,50 +78,16 @@ def _judge_one_candidate(cfg, *, failed_queries: str, old_memory: str, new_memor
         return None
     return res.get("feedback", "Acceptance FAIL.")
 
-def _pick_one_valid(cfg, *, blocks: List[str], failed_queries: str, old_memory: str) -> Tuple[Optional[str], str]:
-    """Pick the first candidate that passes guard+acceptance.
-
-    Returns (picked_or_none, failure_reason_for_retry).
-    """
-    if not blocks:
-        return None, "No \\memory{...} block parsed."
-    min_l = int(getattr(cfg.optimizer, "min_memory_len", 20) or 20)
-    max_l = int(getattr(cfg.optimizer, "max_memory_len", 2000) or 2000)
-
-    first_failure = "Unknown error"
-    for cand in blocks[:1]:  # IMPORTANT: always ONE memory (SUPPLEMENT & SPLIT are 1-to-1)
-        if not _basic_guard(cand, min_len=min_l, max_len=max_l):
-            first_failure = "Rejected by basic guard (length or banned words)."
-            continue
-        fb = _judge_one_candidate(cfg, failed_queries=failed_queries, old_memory=old_memory, new_memory=cand)
-        if fb is None:
-            return cand, "OK"
-        first_failure = fb
-    return None, first_failure
-
-def _rewrite_with_feedback(cfg, *, base_prompt: str, prev_output: str, feedback: str) -> str:
-    retry_prompt = (
-        base_prompt
-        + "\n\n[Previous Attempt]\n"
-        + (prev_output or "")[:800]
-        + "\n\n[Judge Feedback]\n"
-        + (feedback or "")
-        + "\n\nRewrite following the feedback. Output ONLY ONE \\memory{...} block."
-    )
-    return call_llm_batch([retry_prompt], cfg)[0]
-
 # ------------------------------------------------------------------------------
 # Main high-score evolution
 # ------------------------------------------------------------------------------
 
-def evolve_high_score_opt(cfg: DictConfig, memories: Dict, memory_stats: Dict, high_ids: List[str]) -> Set[str]:
+def evolve_high_score_opt(cfg: DictConfig, memories: Dict, memory_stats: Dict,log_file_path, high_ids: List[str]) -> Set[str]:
     """High-score memory evolution (SUPPLEMENT / SPLIT) with robust parsing & rollback.
     Semantics: both SUPPLEMENT and SPLIT add exactly ONE new memory; champion memory is never modified.
     """
     print("\n========== 高分记忆进化阶段 (Ace Evolution) ==========")
 
-    # --- 1) Log path ---
-    log_file_path = cfg.paths.get("highfreq_textgrad_log", "textgrad_debug_log.txt")
     try:
         os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
     except Exception:
@@ -391,7 +267,7 @@ def evolve_high_score_opt(cfg: DictConfig, memories: Dict, memory_stats: Dict, h
         tee_print("   ------------------------------------------------")
         # =======================================================
 
-        student_outputs = call_llm_batch(student_prompts, cfg)
+        student_outputs = call_expert_batch(student_prompts, cfg)
 
         # ========== 🔥【新增打印 2】查看学生初稿 ==========
         # 适配说明：outputs 对应 student_outputs
@@ -511,16 +387,16 @@ def evolve_high_score_opt(cfg: DictConfig, memories: Dict, memory_stats: Dict, h
                     prev_out = last_attempt.get("out", "")
                     fb = cand.get("fail_reason", "Improve logic.")
                     base_prompt = cand["task"]["log"].get("student_prompt", "")
-                    
+                    neg_q = cand["task"].get("neg_text", "")
                     # 构造重写提示词
-                    retry_prompt = (
-                        base_prompt
-                        + "\n\n[Previous Attempt]\n"
-                        + (prev_out or "")[:800]
-                        + "\n\n[Judge Feedback]\n"
-                        + (fb or "")
-                        + "\n\nRewrite following the feedback. Output ONLY ONE \\memory{...} block."
-                    )
+
+                    retry_prompt = cfg.optimizer.prompts.retry_prompt.format(
+                            failed=neg_q,         # 传入错题
+                            ori=base_prompt,       # 这里的 base_prompt 包含了原记忆内容
+                            bad=(prev_out or ""),  
+                            feedback=(fb or "")
+                        )
+                    
                     retry_prompts.append(retry_prompt)
 
             if not retry_prompts:
@@ -536,8 +412,8 @@ def evolve_high_score_opt(cfg: DictConfig, memories: Dict, memory_stats: Dict, h
                     fb = candidates[idx].get("fail_reason", "")
                     tee_print(f"      -> ❌ ID: {mid} | 原因: {fb[:50]}...")
 
-            # 这里的 call_llm_batch 内部是你刚才改的 SGLang 并发版，享受 32 并发
-            retry_outputs = call_llm_batch(retry_prompts, cfg)
+            # 这里的 call_expert_batch 内部是你刚才改的 SGLang 并发版，享受 32 并发
+            retry_outputs = call_expert_batch(retry_prompts, cfg)
             
             # 填入新结果，等待下一轮验证
             for idx, new_out in zip(to_rewrite_indices, retry_outputs):

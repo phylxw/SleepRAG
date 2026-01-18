@@ -1,152 +1,464 @@
-import requests
-import re
-from concurrent.futures import ThreadPoolExecutor
 import os
+import re
+import ast
+import json
+import builtins
+import keyword
+import textwrap
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Tuple, Optional
+
 
 class CodeEvaluator:
-    def __init__(self, server_url="http://localhost:8080", max_workers=16):
-        self.server_url = server_url
+    """
+    Code Evaluator v3.2
+    Key fixes:
+      - MBPP: NO exec() for tests (sandbox-friendly)
+      - Always log full server JSON on failure (schema-agnostic)
+      - Print traceback to stdout with markers (even if stderr not returned)
+      - Safer code extraction: dedent + rstrip
+      - Safer MBPP function-name alignment: AST-based + forbid overriding builtins/keywords
+      - Optional: wrap "function-body-only" outputs into a def shell for MBPP
+    """
+
+    def __init__(
+        self,
+        server_url: str = "http://localhost:8080",
+        max_workers: int = 8,
+        timeout: Tuple[float, float] = (3.0, 30.0),  # (connect, read)
+        inject_common_imports: bool = True,
+        verbose_fail_json_chars: int = 2000,
+    ):
+        self.server_url = server_url.rstrip("/")
         self.max_workers = max_workers
+        self.timeout = timeout
+        self.inject_common_imports = inject_common_imports
+        self.verbose_fail_json_chars = verbose_fail_json_chars
 
+        self._builtin_names = set(dir(builtins))
+        self._keyword_names = set(keyword.kwlist)
+
+        # Denylist: never treat these as "target function name"
+        self._deny_names = set([
+            # very common builtins
+            "len", "range", "print", "map", "filter", "zip", "sum", "max", "min",
+            "sorted", "set", "list", "tuple", "dict", "int", "float", "str", "bool",
+            "abs", "all", "any", "enumerate", "reversed",
+            # testing
+            "assert",
+        ]) | self._builtin_names | self._keyword_names
+
+    # -------------------------
+    # 1) Code extraction
+    # -------------------------
     def extract_python_code(self, text: str) -> str:
-        """从 Markdown 中提取 Python 代码"""
-        pattern = r"```python(.*?)```"
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
-            # 🔥 核心修正：只去除首尾换行，保留缩进
-            return match.group(1).strip('\n')
-        return text.strip('\n')
+        """Extract python code from markdown. Keep relative indentation."""
+        if text is None:
+            return ""
 
-    def evaluate_one(self, dataset_type, pred_str, task_data):
-        """
-        单条评测逻辑
-        """
-        code_body = self.extract_python_code(pred_str)
-        full_code = ""
-        
-        if dataset_type == 'humaneval':
-            # HumanEval: Prompt + Code + Test
-            entry_point = task_data.get('entry_point', 'candidate')
-            test_code = task_data.get('test', '')
-            full_code = f"{task_data['prompt']}\n{code_body}\n\n{test_code}"
+        # Prefer ```python ... ```
+        m = re.search(r"```python(.*?)```", text, re.DOTALL | re.IGNORECASE)
+        if m:
+            return textwrap.dedent(m.group(1)).rstrip()
 
-        elif dataset_type == 'mbpp':
-            # MBPP: Setup + Code + Test List
-            # 注意兼容性：有些数据可能没有 test_setup_code
-            test_list = task_data.get('test_list', [])
-            setup_code = task_data.get('test_setup_code', "")
-            tests_str = "\n".join(test_list)
-            full_code = f"{setup_code}\n{code_body}\n\n{tests_str}"
-            
-        else:
-            return 0.0
+        # Fallback ``` ... ```
+        m = re.search(r"```(.*?)```", text, re.DOTALL)
+        if m:
+            return textwrap.dedent(m.group(1)).rstrip()
+
+        return text.strip()
+
+    # -------------------------
+    # 2) Imports header
+    # -------------------------
+    def _build_header_imports(self, code_body: str) -> str:
+        if not self.inject_common_imports:
+            return ""
+
+        common_imports = [
+            "import math",
+            "import re",
+            "import sys",
+            "import collections",
+            "import heapq",
+            "import itertools",
+            "from typing import *",
+        ]
+
+        header = []
+        lower = code_body.lower()
+        for imp in common_imports:
+            if imp.startswith("import "):
+                token = imp.split()[1]
+                if f"import {token}" in lower:
+                    continue
+            elif imp.startswith("from "):
+                token = imp.split()[1]
+                if f"from {token} import" in lower:
+                    continue
+            header.append(imp)
+
+        return ("\n".join(header) + "\n") if header else ""
+
+    # -------------------------
+    # 3) AST helpers
+    # -------------------------
+    def _defined_functions(self, code_body: str) -> List[str]:
+        names: List[str] = []
+        try:
+            tree = ast.parse(code_body)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef):
+                    names.append(node.name)
+        except Exception:
+            names = re.findall(r"def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", code_body)
+        return names
+
+    def _infer_mbpp_target_name_from_tests(self, test_list: List[str]) -> Optional[str]:
+        """
+        Infer "target function name" from MBPP tests:
+          - Parse each test string with AST if possible
+          - Count ast.Call where func is ast.Name (foo(...))
+          - Skip builtins/keywords/denylist
+        """
+        counts: Dict[str, int] = {}
+        for t in test_list:
+            if not isinstance(t, str) or not t.strip():
+                continue
+            try:
+                tree = ast.parse(t)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                        name = node.func.id
+                        if name in self._deny_names:
+                            continue
+                        counts[name] = counts.get(name, 0) + 1
+            except Exception:
+                # fallback regex
+                for name in re.findall(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", t):
+                    if name in self._deny_names:
+                        continue
+                    counts[name] = counts.get(name, 0) + 1
+
+        if not counts:
+            return None
+        return max(counts.items(), key=lambda kv: kv[1])[0]
+
+    def _maybe_make_alignment_code(
+        self,
+        defined_funcs: List[str],
+        target_name: Optional[str],
+        code_body: str,
+    ) -> str:
+        """
+        Safe alignment:
+          - Only if target_name exists AND target_name not defined
+          - If only 1 function defined => alias target = that function
+          - If multiple => alias to last defined (common CoT), still conservative
+        """
+        if not target_name:
+            return ""
+        if target_name in defined_funcs:
+            return ""
+        if not defined_funcs:
+            return ""
+
+        # If code already assigns target_name, skip
+        if re.search(rf"\b{re.escape(target_name)}\b\s*=", code_body):
+            return ""
+
+        if len(defined_funcs) == 1:
+            src = defined_funcs[0]
+            if src != target_name:
+                return f"\n{target_name} = {src}\n"
+            return ""
+
+        src = defined_funcs[-1]
+        if src != target_name:
+            return f"\n{target_name} = {src}\n"
+        return ""
+
+    def _maybe_wrap_function_body(self, code_body: str, target_name: Optional[str]) -> str:
+        """
+        If model outputs only function body (no def), MBPP will SyntaxError.
+        Conservative wrap:
+          def target(*args, **kwargs):
+              <body>
+        """
+        if "def " in code_body:
+            return code_body
+        if not target_name:
+            return code_body
+
+        body = textwrap.dedent(code_body).strip("\n")
+        if not body:
+            return code_body
+        body_ind = textwrap.indent(body, "    ")
+        return f"def {target_name}(*args, **kwargs):\n{body_ind}\n"
+
+    # -------------------------
+    # 4) Build runnable code
+    # -------------------------
+    def _wrap_with_traceback_stdout(self, inner_code: str) -> str:
+        """
+        Wrap execution so that any exception prints traceback into stdout with markers,
+        then re-raises to make runner mark it as failure.
+        """
+        return f"""
+try:
+{textwrap.indent(inner_code, "    ")}
+except Exception:
+    import traceback as __tb
+    print("EVAL_ERROR_TRACEBACK_BEGIN")
+    print(__tb.format_exc())
+    print("EVAL_ERROR_TRACEBACK_END")
+    raise
+"""
+
+    def _build_humaneval_code(self, code_body: str, task_data: Dict[str, Any]) -> Tuple[str, str]:
+        entry_point = task_data.get("entry_point", "candidate")
+        test_code = task_data.get("test", "")
+        prompt = task_data.get("prompt", "")
+
+        if not isinstance(test_code, str) or not test_code.strip():
+            return "", "Missing HumanEval test code"
+
+        header = self._build_header_imports(code_body)
+
+        inner = (
+            f"{header}\n"
+            f"{prompt}\n"
+            f"{code_body}\n\n"
+            f"candidate = {entry_point}\n"
+            f"{test_code}\n\n"
+            f"check(candidate)\n"
+        )
+        full_code = self._wrap_with_traceback_stdout(inner)
+        return full_code, ""
+
+    def _build_mbpp_code(self, code_body: str, task_data: Dict[str, Any]) -> Tuple[str, str]:
+        test_list = task_data.get("test_list", [])
+        setup_code = task_data.get("test_setup_code", "")
+
+        if not isinstance(test_list, list) or len(test_list) == 0:
+            return "", "Missing MBPP test_list"
+
+        target_name = self._infer_mbpp_target_name_from_tests(test_list)
+
+        # Wrap if needed (no def)
+        code_body2 = self._maybe_wrap_function_body(code_body, target_name)
+
+        defined_funcs = self._defined_functions(code_body2)
+        alignment_code = self._maybe_make_alignment_code(defined_funcs, target_name, code_body2)
+
+        header = self._build_header_imports(code_body2)
+
+        # Build sandbox-friendly test runner:
+        # NO exec(string). We insert test statements directly into try blocks.
+        runner_lines = []
+        runner_lines.append("def __run_mbpp_tests():")
+        for i, tc in enumerate(test_list):
+            if not isinstance(tc, str) or not tc.strip():
+                continue
+            tc_clean = tc.strip("\n")
+            tc_block = "\n".join(("        " + line) for line in tc_clean.splitlines())
+            runner_lines.append("    try:")
+            runner_lines.append(tc_block)
+            runner_lines.append("    except Exception as __e:")
+            safe_tc = tc_clean.replace('"', '\\"')
+            # 2. 然后再拼接
+            runner_lines.append(
+                "        raise RuntimeError("
+                f"\"MBPP Test Failed\\nTest ID: {i}\\nTest: {safe_tc}\\n\""
+                " + f\"Error: {type(__e).__name__}: {__e}\""
+                "        ) from __e"
+            )
+        runner_lines.append("__run_mbpp_tests()")
+        runner_code = "\n".join(runner_lines) + "\n"
+
+        inner = (
+            f"{header}\n"
+            f"{setup_code}\n"
+            f"{code_body2}\n"
+            f"{alignment_code}\n"
+            f"{runner_code}\n"
+        )
+        full_code = self._wrap_with_traceback_stdout(inner)
+        return full_code, ""
+
+    # -------------------------
+    # 5) Run via server (schema-agnostic)
+    # -------------------------
+    def _summarize_fail_json(self, res_json: Dict[str, Any]) -> str:
+        try:
+            s = json.dumps(res_json, ensure_ascii=False)
+        except Exception:
+            s = str(res_json)
+        if len(s) > self.verbose_fail_json_chars:
+            s = s[: self.verbose_fail_json_chars] + " ...[truncated]..."
+        return s
+
+    def _run_remote(self, full_code: str) -> Tuple[bool, str, Dict[str, Any]]:
+        try:
+            resp = requests.post(
+                f"{self.server_url}/run_code",
+                json={"code": full_code, "language": "python"},
+                timeout=self.timeout,
+            )
+        except Exception as e:
+            return False, f"RequestError: {type(e).__name__}: {e}", {}
+
+        if resp.status_code != 200:
+            return False, f"HTTP {resp.status_code}: {resp.text[:1000]}", {}
 
         try:
-            resp = requests.post(f"{self.server_url}/run_code", json={
-                'code': full_code,
-                'language': 'python'
-            }, timeout=10) # 建议保持 10s 配合服务端限制
-            
-            if resp.status_code == 200:
-                res_json = resp.json()
-                if res_json.get('status') == 'Success':
-                    return 1.0
-            return 0.0
-        except Exception as e:
-            # 生产环境可以选择打印 log 或忽略
-            # print(f"⚠️ [Eval Error] {e}") 
-            return 0.0
+            res_json = resp.json()
+        except Exception:
+            return False, f"BadJSONResponse: {resp.text[:2000]}", {}
 
-    def evaluate_batch(self, dataset_type, pred_list, task_data_list):
-        """
-        ⚡ 批量并发评测 (供 sglang 模式使用)
-        """
-        print(f"⚖️ [CodeEval] 正在并发评测 {len(pred_list)} 条代码 (Workers={self.max_workers})...")
-        
-        scores = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = []
-            for pred, item in zip(pred_list, task_data_list):
-                futures.append(executor.submit(self.evaluate_one, dataset_type, pred, item))
-            
-            for future in futures:
-                scores.append(future.result())
-                
-        return scores
+        status = str(res_json.get("status", ""))
 
-def evaluate_code_results(results, experiment_name, result_log_file, dataset_type="humaneval", server_url="http://localhost:8080"):
-    """
-    🔥 新增函数：专门用于评测代码 (HumanEval/MBPP)
-    特点：
-    1. 内部使用 CodeEvaluator.evaluate_batch 实现并发加速
-    2. 日志格式与数学评测完全保持一致
-    """
-    # 1. 初始化评测器
-    evaluator = CodeEvaluator(server_url=server_url, max_workers=16) # 这里的 workers 可以根据需要调整
-    
-    # 2. 准备数据 (批量提取)
-    # 注意：CodeEvaluator 需要 raw data (dict 形式) 来获取 test_list 等字段
-    # 如果 results 是 FlashRAG 的对象，通常可以将 item 转为 dict 或直接传
-    task_data_list = []
-    preds_list = []
-    
+        if status == "Success":
+            return True, "Success", res_json
+
+        # Try to find any error-like fields (unknown schema)
+        # Common candidates: error/stderr/traceback/message/result/output
+        candidates = []
+        for k in ["error", "stderr", "traceback", "exception", "message", "result", "output", "details"]:
+            v = res_json.get(k, None)
+            if v:
+                candidates.append(f"{k}={str(v)[:800]}")
+        stdout = res_json.get("stdout", "")
+        if stdout:
+            candidates.append(f"stdout={str(stdout)[:800]}")
+
+        # If still empty, include full json (truncated)
+        if not candidates:
+            candidates.append("full_json=" + self._summarize_fail_json(res_json))
+
+        reason = f"RunnerFail: status={status}; " + "; ".join(candidates)
+        return False, reason, res_json
+
+    # -------------------------
+    # 6) Public APIs
+    # -------------------------
+    def evaluate_one(self, dataset_type: str, pred_str: str, task_data: Dict[str, Any]) -> Tuple[float, str]:
+        code_body = self.extract_python_code(pred_str)
+        if not code_body.strip():
+            return 0.0, "Empty code"
+
+        if dataset_type == "humaneval":
+            full_code, build_err = self._build_humaneval_code(code_body, task_data)
+        elif dataset_type == "mbpp":
+            full_code, build_err = self._build_mbpp_code(code_body, task_data)
+        else:
+            return 0.0, f"Unknown dataset_type={dataset_type}"
+
+        if build_err:
+            return 0.0, f"BuildError: {build_err}"
+        if not full_code.strip():
+            return 0.0, "Empty full_code"
+
+        ok, reason, _payload = self._run_remote(full_code)
+        return (1.0, "") if ok else (0.0, reason)
+
+    def evaluate_batch(
+        self,
+        dataset_type: str,
+        pred_list: List[str],
+        task_data_list: List[Dict[str, Any]],
+    ) -> Tuple[List[float], List[str]]:
+        n = len(pred_list)
+        scores = [0.0] * n
+        reasons = [""] * n
+
+        print(f"⚖️ [CodeEval] Evaluating {n} samples (dataset={dataset_type}, workers={self.max_workers})...")
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
+            futures = {ex.submit(self.evaluate_one, dataset_type, pred, item): i
+                       for i, (pred, item) in enumerate(zip(pred_list, task_data_list))}
+
+            for fut in as_completed(futures):
+                i = futures[fut]
+                try:
+                    s, r = fut.result()
+                except Exception as e:
+                    s, r = 0.0, f"InternalError: {type(e).__name__}: {e}"
+                scores[i] = s
+                reasons[i] = r
+
+        return scores, reasons
+
+
+def evaluate_code_results(
+    results: List[Any],
+    experiment_name: str,
+    result_log_file: str,
+    dataset_type: str = "humaneval",
+    server_url: str = "http://localhost:8080",
+    max_workers: int = 8,
+) -> Tuple[float, List[float]]:
+    evaluator = CodeEvaluator(server_url=server_url, max_workers=max_workers)
+
+    task_data_list: List[Dict[str, Any]] = []
+    preds_list: List[str] = []
+
     for item in results:
-        # 兼容性处理：如果是对象则转 dict，如果是 dict 则直接用
-        data_dict = item.__dict__ if hasattr(item, '__dict__') else item
+        data_dict = item.__dict__ if hasattr(item, "__dict__") else item
+        if not isinstance(data_dict, dict):
+            data_dict = {}
         task_data_list.append(data_dict)
-        
-        # 获取预测值
-        pred = item.pred if hasattr(item, 'pred') else item.get('pred', "")
+
+        pred = item.pred if hasattr(item, "pred") else (item.get("pred", "") if isinstance(item, dict) else "")
         preds_list.append(pred)
 
-    # 3. 🔥 并发批量评测 (这是速度的关键)
-    print(f"🚀 [Eval] 正在并发评测 {len(results)} 条代码数据 ({dataset_type})...")
-    scores = evaluator.evaluate_batch(dataset_type, preds_list, task_data_list)
-    
-    # 4. 统计与日志记录 (模仿 evaluate_math_results 的风格)
+    print(f"🚀 [Eval] Running code evaluation for {len(results)} samples ({dataset_type})...")
+    scores, reasons = evaluator.evaluate_batch(dataset_type, preds_list, task_data_list)
+
     correct = 0
     total = len(results)
-    
-    os.makedirs(os.path.dirname(result_log_file), exist_ok=True)
+
+    os.makedirs(os.path.dirname(result_log_file) or ".", exist_ok=True)
 
     with open(result_log_file, "a", encoding="utf-8") as f:
         header = f"\n{'='*20} {experiment_name} (Code) {'='*20}\n"
-        print(header.strip()) 
+        print(header.strip())
         f.write(header)
-        
-        for i, (item, score, pred) in enumerate(zip(results, scores, preds_list)):
+
+        for i, (item, score, pred, reason) in enumerate(zip(results, scores, preds_list, reasons)):
             is_right = (score == 1.0)
             if is_right:
                 correct += 1
-            
-            # 获取问题用于展示 (Code 任务通常 prompt 就是 question)
-            # 尝试获取 prompt, text 或 question 字段
+
             q_text = ""
-            if hasattr(item, 'prompt'): q_text = item.prompt
-            elif hasattr(item, 'text'): q_text = item.text # MBPP
-            elif isinstance(item, dict): q_text = item.get('prompt', item.get('text', ""))
-            
-            # 为了日志好看，提取纯代码部分展示
+            if hasattr(item, "prompt"):
+                q_text = item.prompt
+            elif hasattr(item, "text"):
+                q_text = item.text
+            elif isinstance(item, dict):
+                q_text = item.get("prompt", item.get("text", ""))
+
             extracted_code = evaluator.extract_python_code(pred)
-            
-            # [cite_start]日志记录 [cite: 19, 20]
+
             log_entry = (
                 f"\n[ID]: {i}\n"
-                f"[Question/Prompt]: {str(q_text)[:80]}...\n" # 防止 Prompt 太长
-                f"[Pred Extracted]: \n{extracted_code[:200]}...\n" # 只展示代码前200字符
+                f"[Question/Prompt]: {str(q_text)[:80]}...{str(q_text)[-80:]}\n"
+                f"[Pred Extracted]:\n{extracted_code}\n"
                 f"[Result]: {'✅ Correct' if is_right else '❌ Wrong (Pass@1)'}\n"
-                f"{'-'*30}\n"
             )
+            if not is_right:
+                log_entry += f"[Failure Reason]: {reason}\n"
+            log_entry += "-" * 30 + "\n"
+
             f.write(log_entry)
-            
-            # 控制台预览前 3 条
-            if i < 3:
+
+            if i < 1 or (not is_right and i < 15):
                 print(log_entry.strip())
 
-        # [cite_start]统计最终准确率 [cite: 21]
-        acc = correct / total * 100 if total > 0 else 0
+        acc = (correct / total * 100) if total > 0 else 0.0
         summary = (
-            f"\n📊 统计 ({experiment_name}):\n"
+            f"\n📊 Summary ({experiment_name}):\n"
             f"Dataset: {dataset_type.upper()}\n"
             f"Total: {total}, Correct: {correct}, Accuracy (Pass@1): {acc:.2f}%\n"
             f"{'='*50}\n"
@@ -154,36 +466,25 @@ def evaluate_code_results(results, experiment_name, result_log_file, dataset_typ
         print(summary)
         f.write(summary)
 
-    return acc
+    return acc, scores
 
-# 简单的自测入口，确认文件没拷错
+
+# -------------------------
+# Self-test
+# -------------------------
 if __name__ == "__main__":
-    print("🚀 [Self-Test] 开始调试...")
-    evaluator = CodeEvaluator(server_url="http://localhost:8080")
+    print("🚀 [Self-Test] Start...")
 
-    # 1. HumanEval 测试
-    he_task_data = {
-        "prompt": "def multiply(a, b):",
-        "entry_point": "multiply",
-        "test": "assert multiply(2, 3) == 6"
-    }
-    # 注意：这里的 return 前面有4个空格
-    he_pred = """```python
-    return a * b
-```"""
-    
-    print("\n-------------------------------------")
-    print("🧪 测试场景 1: HumanEval")
-    score_he = evaluator.evaluate_one("humaneval", he_pred, he_task_data)
-    print(f"➡️ 结果: {score_he}")
+    evaluator = CodeEvaluator(server_url="http://localhost:8080", max_workers=2)
 
-    # 2. MBPP 测试
-    print("\n-------------------------------------")
-    print("🧪 测试场景 2: MBPP")
+    # MBPP-like test: name mismatch (should be fixed by alignment)
     mbpp_task_data = {
-        "test_setup_code": "import math",
-        "test_list": ["assert get_sqrt(4) == 2.0"]
+        "test_setup_code": "",
+        "test_list": [
+            "assert get_sqrt(4) == 2.0",
+            "assert get_sqrt(9) == 3.0",
+        ],
     }
-    mbpp_pred = "def get_sqrt(n): return math.sqrt(n)"
-    score_mbpp = evaluator.evaluate_one("mbpp", mbpp_pred, mbpp_task_data)
-    print(f"➡️ 结果: {score_mbpp}")
+    mbpp_pred = "def my_sqrt(n):\n    import math\n    return math.sqrt(n)\n"
+    s, r = evaluator.evaluate_one("mbpp", mbpp_pred, mbpp_task_data)
+    print(f"[MBPP] score={s}, reason={r}")

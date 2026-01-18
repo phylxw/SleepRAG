@@ -1,37 +1,48 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Set
 from omegaconf import DictConfig, OmegaConf
 
 def select_ids_from_stats(memory_stats: Dict[str, dict], cfg: DictConfig) -> Tuple[List[str], List[str], List[str]]:
     """
     Select IDs for the Tri-Stream Optimization Framework (ICML).
     
-    Returns three distinct lists:
-    1. high_ids (Retention/Pruning): Top WinRate. Used for pruning redundancy.
-    2. bad_ids  (Correction): Bottom WinRate. Used for TextGrad repair.
-    3. evolve_ids (Evolution): High Beta (Friction). Used for Split/Supplement.
+    Logic Flow:
+    1. Pre-calculate metrics (WinRate, Friction, Obs).
+    2. Stream 1 (Evolve): Pick High Friction items (High Alpha & High Beta).
+    3. Stream 2 (High): Pick High WinRate items (High Alpha & Low Beta) - EXCLUDING Evolve IDs.
+    4. Stream 3 (Bad): Pick Low WinRate items (High Beta).
     """
+    INIT_VAL = cfg.parameters.INIT_VAL
     scores: List[dict] = []
 
     # ---- Config ----
-    # 数量限制
-    top_k_high = int(cfg.optimizer.get("top_k_high", 50))       # 剪枝候选池大小
-    bottom_k_low = int(cfg.optimizer.get("bottom_k_low", 80))   # 低分修复池大小
-    top_k_evolve = int(cfg.optimizer.get("top_k_evolve", 50))   # 进化候选池大小 (新增)
+    top_k_high = int(cfg.optimizer.get("top_k_high", 50))
+    bottom_k_low = int(cfg.optimizer.get("bottom_k_low", 80))
+    top_k_evolve = int(cfg.optimizer.get("top_k_evolve", 50))
 
-    # 门槛
+    # Thresholds
     legacy_freq_th = float(cfg.optimizer.get("low_freq_threshold", 1))
     min_obs = float(cfg.optimizer.get("min_obs_threshold", legacy_freq_th))
-    
-    # 进化流的特殊门槛：必须是“好人” (Win >= 0.5) 才能进化，坏人直接去修了
     evolve_win_rate_th = float(cfg.optimizer.get("evolve_win_rate_threshold", 0.5))
 
+    # =========================================================
+    # 0. Pre-calculation (一次性算好所有指标)
+    # =========================================================
     for mid, stats in memory_stats.items():
-        alpha = float(stats.get("alpha", 1.0))
-        beta = float(stats.get("beta", 1.0))
+        alpha = float(stats.get("alpha", INIT_VAL))
+        beta = float(stats.get("beta", INIT_VAL))
         total = alpha + beta
-        win_rate = alpha / total if total > 0 else 0.5
-        n_obs = max(0.0, total - 2.0)
-        neg_q_len = len(stats.get("neg_queries", []))
+        
+        # 避免除以零
+        win_rate = alpha / total if total > 1e-6 else 0.5
+        
+        # 计算有效观测数 (去除初始值的影响)
+        n_obs = max(0.0, total - (INIT_VAL * 2))
+        
+        # 计算 Friction (摩擦力/争议度)
+        # 只有当 Alpha 和 Beta 都很大时，Friction 才会大
+        # 这里的摩擦力公式：(Alpha * Beta) / Total^2 (归一化到 0-0.25) 或者 (Alpha * Beta) / Total
+        # 用 simplified harmonic mean 变体:
+        friction = (alpha * beta) / total if total > 1e-6 else 0.0
 
         scores.append({
             "mid": str(mid),
@@ -40,114 +51,109 @@ def select_ids_from_stats(memory_stats: Dict[str, dict], cfg: DictConfig) -> Tup
             "alpha": alpha,
             "beta": beta,
             "total": total,
-            "neg_len": neg_q_len
+            "friction": friction,
+            "neg_len": len(stats.get("neg_queries", []))
         })
 
     # =========================================================
-    # Stream 1: High-Score Retention (用于剪枝/维护)
+    # Stream 1: Evolution Candidates (优先挑选！)
     # =========================================================
-    # 逻辑：谁最完美谁排前面 (WinRate Desc, Alpha Desc)
-    # 目的：找出最强的记忆，后续 Prune 模块会看这些记忆是否语义重复，保留最强的
-    high_pool = [s for s in scores if s["n_obs"] >= min_obs and s["win_rate"] >= 0.5]
-    high_pool.sort(key=lambda x: (-x["win_rate"], -x["alpha"], x["mid"]))
-    high_ids = [x["mid"] for x in high_pool[:top_k_high]]
+    # 定义：总体是好的(WinRate >= 0.5)，但存在严重争议(High Friction/Beta)
+    evolve_candidates = []
+    for s in scores:
+        # 1. 过滤：只看胜率过得去的（太差的直接去 Bad Stream 了）
+        if s["win_rate"] < evolve_win_rate_th:
+            continue
+        
+        # 2. 过滤：活跃度门槛
+        if s["n_obs"] < min_obs:
+            continue
 
-    # =========================================================
-    # Stream 2: Low-Score Restoration (用于修复/重写)
-    # =========================================================
-    # 逻辑：谁最烂谁排前面 (WinRate Asc)
-    # 目的：找出拖后腿的，送去 TextGrad (Refine/Replace)
-    low_pool = [s for s in scores if s["n_obs"] >= min_obs and s["win_rate"] < 0.5]
-    low_pool.sort(key=lambda x: (x["win_rate"], -x["n_obs"], x["mid"]))
-    bad_ids = [x["mid"] for x in low_pool[:bottom_k_low]]
-
-    # =========================================================
-    # Stream 3: Evolution Candidates (用于进化/细分)
-    # =========================================================
-    # 逻辑：在好人堆里(Win>=0.5)，谁的摩擦(Beta)最大，谁排前面
-    # 目的：找出有争议的“高分”，送去 Expert (Supplement/Split)
-    evolve_pool = [
-        s for s in scores 
-        if (s["win_rate"] >= evolve_win_rate_th)  # 必须是“总体正确”的
-        and (s["beta"] > 1.0)                     # 必须有过失败经历 (Beta>1代表只要有错题)
-        and (s["mid"] not in bad_ids)             # 互斥：不能是已经被划为烂记忆的
-    ]
+        # 3. 核心过滤：必须有“痛苦经历” (Beta 显著)
+        # 如果 Beta 还没超过初始值太多，说明没怎么错过，不需要进化
+        # 比如 INIT=1, Beta必须 > 1.5 或 2.0 才算有摩擦
+        if s["beta"] <= (INIT_VAL + 0.5): 
+            continue
+            
+        evolve_candidates.append(s)
     
-    # 排序核心：Beta 越大 -> 错得越多 -> 进化需求越强
-    evolve_pool.sort(key=lambda x: (-x["beta"], -x["neg_len"], -x["n_obs"]))
-    evolve_ids = [x["mid"] for x in evolve_pool[:top_k_evolve]]
+    # 排序：摩擦力最大的优先 (说明模型对此最困惑)
+    # Secondary Sort: 负样本数量 (越多越好分析)
+    evolve_candidates.sort(key=lambda x: (-x["friction"], -x["neg_len"]))
+    
+    # 截断
+    evolve_final = evolve_candidates[:top_k_evolve]
+    evolve_ids = [x["mid"] for x in evolve_final]
+    evolve_ids_set = set(evolve_ids) # 方便后续 O(1) 查找
 
-    # ---- 打印统计 ----
-    print(f"\n📊 [Tri-Stream Selection]")
-    print(f"   🔹 Retention Stream (High IDs) : {len(high_ids)} (Sort: WinRate Desc)")
-    print(f"   🔸 Restoration Stream (Bad IDs): {len(bad_ids)}  (Sort: WinRate Asc)")
-    print(f"   🧬 Evolution Stream (Evolve IDs): {len(evolve_ids)} (Sort: Beta Desc)")
+    # =========================================================
+    # Stream 2: High-Score Retention (捡剩下的好果子)
+    # =========================================================
+    # 定义：胜率高，且非常纯粹 (低摩擦)，且没被 Evolve 选走
+    high_candidates = []
+    for s in scores:
+        # 1. 过滤：必须是赢家
+        if s["win_rate"] < 0.5:
+            continue
+            
+        # 2. 过滤：活跃度
+        if s["n_obs"] < min_obs:
+            continue
+
+        # 3. 【关键互斥】：如果已经被选去进化了，这里就不要了
+        if s["mid"] in evolve_ids_set:
+            continue
+            
+        high_candidates.append(s)
+
+    # 排序：胜率高的优先，胜率一样看 Alpha (绝对贡献)
+    high_candidates.sort(key=lambda x: (-x["win_rate"], -x["alpha"]))
+    
+    # 截断
+    high_final = high_candidates[:top_k_high]
+    high_ids = [x["mid"] for x in high_final]
+
+    # =========================================================
+    # Stream 3: Low-Score Restoration (独立筛选)
+    # =========================================================
+    # 定义：胜率低的“垃圾”记忆
+    bad_candidates = []
+    for s in scores:
+        # 1. 过滤：输家
+        if s["win_rate"] >= 0.5:
+            continue
+            
+        # 2. 过滤：活跃度 (注意：这里可能需要宽容一点，或者由外部 Config 控制)
+        # 如果一个记忆只错了一次(Case 4)，Beta稍涨，WinRate下降，应该被捕捉
+        if s["n_obs"] < min_obs:
+            continue
+            
+        bad_candidates.append(s)
+
+    # 排序：
+    # 第一优先级: WinRate 越低越好 (升序) -> 0.1 比 0.4 更急需修复
+    # 第二优先级: Total (活跃度) 越高越好 (降序) -> 同样是 0.1 胜率，错 100 次的比错 1 次的危害更大！
+    bad_candidates.sort(key=lambda x: (x["win_rate"], -x["total"]))
+    
+    # 截断
+    bad_final = bad_candidates[:bottom_k_low]
+    bad_ids = [x["mid"] for x in bad_final]
+
+    # ---- 打印调试信息 (方便你看到每个流选了啥) ----
+    print(f"\n📊 [Tri-Stream Selection Report]")
+    
+    print(f" 🧬 Evolution Stream (Top {len(evolve_ids)}) | Criteria: High Friction")
+    if evolve_final:
+        print(f"    Sample: ID={evolve_final[0]['mid']} | Win={evolve_final[0]['win_rate']:.2f} | Beta={evolve_final[0]['beta']:.1f} | Fric={evolve_final[0]['friction']:.2f}")
+    else:
+        print("    [Empty] No candidates met criteria.")
+
+    print(f" 🔹 Retention Stream (Top {len(high_ids)}) | Criteria: High WinRate")
+    if high_final:
+        print(f"    Sample: ID={high_final[0]['mid']} | Win={high_final[0]['win_rate']:.2f} | Alpha={high_final[0]['alpha']:.1f}")
+
+    print(f" 🔸 Restoration Stream (Top {len(bad_ids)}) | Criteria: Low WinRate")
+    if bad_final:
+        print(f"    Sample: ID={bad_final[0]['mid']} | Win={bad_final[0]['win_rate']:.2f} | Total={bad_final[0]['total']:.1f}")
 
     return high_ids, bad_ids, evolve_ids
-
-
-# ==============================================================================
-# 🧪 测试代码 (Run this file directly)
-# ==============================================================================
-if __name__ == "__main__":
-    # Mock Data: 模拟真实的 ICML 实验数据分布
-    mock_stats = {
-        # 1. 完美记忆 (Retention Candidates)
-        "mem_perfect_1": {"alpha": 100, "beta": 0, "neg_queries": []},
-        "mem_perfect_2": {"alpha": 50, "beta": 0, "neg_queries": []},
-
-        # 2. 摩擦记忆 (Evolution Candidates) - 总体是好的，但经常在特定Case出错
-        "mem_friction_high": {"alpha": 80, "beta": 20, "neg_queries": ["err"]*20}, # Win=0.8, Beta=20
-        "mem_friction_mid":  {"alpha": 90, "beta": 5, "neg_queries": ["err"]*5},  # Win=0.9, Beta=5
-        
-        # 3. 垃圾记忆 (Restoration Candidates)
-        "mem_trash_1": {"alpha": 1, "beta": 50, "neg_queries": ["err"]*50}, # Win=0.02
-        "mem_trash_2": {"alpha": 10, "beta": 20, "neg_queries": ["err"]*20}, # Win=0.33
-        
-        # 4. 新记忆 (0.5分)
-        "mem_new": {"alpha": 1, "beta": 1, "neg_queries": []},
-    }
-
-    # Config
-    cfg = OmegaConf.create({
-        "optimizer": {
-            "top_k_high": 5,
-            "bottom_k_low": 5,
-            "top_k_evolve": 5, # 新增参数
-            "min_obs_threshold": 1,
-            "evolve_win_rate_threshold": 0.5
-        }
-    })
-
-    print("🚀 Running Tri-Stream Selection Test...\n")
-    high_ids, bad_ids, evolve_ids = select_ids_from_stats(mock_stats, cfg)
-
-    # 验证 High (剪枝流)
-    print("-" * 60)
-    print(f"🔹 Retention Stream (High IDs) | 预期: 完美的高分记忆")
-    print("-" * 60)
-    for mid in high_ids:
-        s = mock_stats[mid]
-        total = s['alpha'] + s['beta']
-        wr = s['alpha'] / total
-        print(f"ID: {mid:<20} | Win: {wr:.2f} | Alpha: {s['alpha']}")
-
-    # 验证 Bad (修复流)
-    print("\n" + "-" * 60)
-    print(f"🔸 Restoration Stream (Bad IDs) | 预期: 胜率最低的")
-    print("-" * 60)
-    for mid in bad_ids:
-        s = mock_stats[mid]
-        total = s['alpha'] + s['beta']
-        wr = s['alpha'] / total
-        print(f"ID: {mid:<20} | Win: {wr:.2f} | Alpha: {s['alpha']}")
-
-    # 验证 Evolve (进化流)
-    print("\n" + "-" * 60)
-    print(f"🧬 Evolution Stream (Evolve IDs) | 预期: 高Beta的'好'记忆")
-    print("-" * 60)
-    for mid in evolve_ids:
-        s = mock_stats[mid]
-        total = s['alpha'] + s['beta']
-        wr = s['alpha'] / total
-        print(f"ID: {mid:<20} | Beta: {s['beta']:<4} | Win: {wr:.2f} (Needs Split/Supp)")

@@ -1,6 +1,6 @@
 # conf/experiment/humaneval.yaml
 # 用途: 使用 MBPP 构建代码记忆库，去测试 HumanEval 代码生成能力
-tag: "humaneval"
+tag: "mbpp"
 corpus: "mbpp" 
 mode: "rag" 
 
@@ -11,13 +11,13 @@ mode: "rag"
 # 这里我们使用 MBPP (sanitized) 的训练集作为"参考书"
 corpus_dataset_name: "google-research-datasets/mbpp"
 corpus_dataset_config: "sanitized"
-corpus_split: "test" 
+corpus_split: "train" 
 
 # ==========================================
 # 2. 测试集配置 (Test)
 # ==========================================
 # 🔥 [关键] 名字里必须带 "humaneval"，触发 pre.py 的代码评测逻辑
-test_dataset_name: "openai/openai_humaneval"
+test_dataset_name: "google-research-datasets/mbpp"
 test_dataset_config: null
 test_split: "test" # HumanEval 只有 test 集
 

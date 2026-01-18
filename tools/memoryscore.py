@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from tools.score.bemr import _calculate_bemr_final_score
 import copy
 
+
 def _load_memory_corpus(corpus_file: str):
     """辅助函数：读取记忆库文件"""
     all_memory_ids = set()
@@ -23,76 +24,102 @@ def _load_memory_corpus(corpus_file: str):
         print(f"⚠️ 无法读取记忆库文件 {corpus_file}，错误: {e}")
     return all_memory_ids, id_to_content
 
-def _calculate_scores(rag_results, all_memory_ids, cfg: DictConfig, old_stats=None):
+def _calculate_scores(rag_results, all_memory_ids, cfg, old_stats=None, baseline_scores=None):
     """
-    修改版：基于 BEMR (Bayesian-EM Memory Refinement) 计算分数
-    功能：
-    1. 继承上一轮状态 (持续学习)
-    2. 更新 Alpha/Beta (贝叶斯更新)
-    3. 捕获导致错误的 Query (作为 TextGrad 的梯度)
+    修改版：支持 Counterfactual Update (差分更新 / 边际效用)
     """
-    
-    # 1. 继承或初始化统计量
+    INIT_VAL = cfg.parameters.INIT_VAL
+    # 1. 继承或初始化统计量 (不变)
     if old_stats:
-        # 深拷贝以防修改原引用
         memory_stats = copy.deepcopy(old_stats)
-        # 补齐可能新增的记忆 ID (防止 Key Error)
+        # 确保所有 memory_id 都在 stats 里
         for mid in all_memory_ids:
             if mid not in memory_stats:
-                memory_stats[mid] = {'alpha': 1.0, 'beta': 1.0, 'pos_queries': [], 'neg_queries': []}
+                memory_stats[mid] = {'alpha': INIT_VAL, 'beta': INIT_VAL, 'pos_queries': [], 'neg_queries': []}
     else:
-        # 冷启动：全部初始化为 Prior (1.0, 1.0)
-        memory_stats = {mid: {'alpha': 1.0, 'beta': 1.0, 'pos_queries': [], 'neg_queries': []} for mid in all_memory_ids}
+        memory_stats = {mid: {'alpha': INIT_VAL, 'beta': INIT_VAL, 'pos_queries': [], 'neg_queries': []} for mid in all_memory_ids}
 
     correct_count = 0
     
-    # 2. 遍历结果更新状态
-    for item in tqdm(rag_results, desc="Scoring & Capturing Gradients (BEMR)"):
-        # 假设 judge_math_item 在外部作用域可用
-        is_correct, _, _ = judge_math_item(item)
-        if is_correct: correct_count += 1
+    # 2. 遍历结果更新状态 (注意：使用 enumerate 获取索引 i)
+    for i, item in enumerate(tqdm(rag_results, desc="Scoring & Capturing Gradients (BEMR)")):
+        
+        # --- A. 获取 RAG 正确性 (With Memory) ---
+        if cfg.experiment.tag in ["humaneval", "mbpp"]:
+            is_rag_correct = (item.score == 1.0)
+        else:
+            try:
+                is_rag_correct, _, _ = judge_math_item(item)
+            except Exception:
+                is_rag_correct = False
+        
+        if is_rag_correct: correct_count += 1
 
-        # 获取当前 Query (这是 TextGrad 的“梯度”来源)
-        # 获取问题和答案
-        q = getattr(item, 'question', '').strip()
-        a = getattr(item, 'golden_answers', '')
-        # 🔥 改法 1: 紧凑型 (适合短文本)
-        # current_query = f"Question: {q} | Ground Truth: {a}"
-        # 🔥 改法 2: 结构化型 (推荐，适合 Math/Reasoning 长文本)
-        # 这样写，专家模型能一眼看清标准答案，从而生成更准确的梯度
-        current_query = f"[Question]: {q}\n   [Target Answer]: {a}"
+        # --- B. 🔥 获取 Baseline 正确性 (Without Memory) ---
+        if baseline_scores and i < len(baseline_scores):
+            # Baseline 的分数如果是 1.0 也就是对，0.0 是错
+            is_base_correct = (baseline_scores[i] == 1.0)
+        else:
+            # 如果没有提供 Baseline (第一轮或被关掉)，为了安全：
+            # 策略1: 假设 Baseline 全错 -> 退化回旧算法 (只要 RAG 对了就奖励)
+            # 策略2: 假设 Baseline 全对 -> 极其保守 (除非 RAG 也是对的否则不奖励)
+            # 这里选用策略1，保持兼容性
+            is_base_correct = False 
 
+        # --- C. 构造 TextGrad 用的 Query ---
+        q = getattr(item, 'question', '') or getattr(item, 'prompt', '') or ''
+        q = q.strip()
+        gold_list = getattr(item, 'golden_answers', [])
+        a = gold_list[0] if gold_list else "No Answer Provided"
+        current_query = f"[Question]: {q}\n   [Target Answer]: {str(a)[:500]}"
+
+        # --- D. 🔥 更新记忆权重 (核心逻辑) ---
         retrieved_docs = getattr(item, 'retrieval_result', [])
         
         for doc in retrieved_docs:
             doc_id = str(doc.get('id')) if isinstance(doc, dict) else str(getattr(doc, 'id', None))
             
-            # 只要 doc_id 存在于我们的库中，就进行更新
             if doc_id and doc_id in memory_stats:
-                if is_correct:
-                    # ✅ 答对：Alpha + 1
-                    memory_stats[doc_id]['alpha'] += 1.0
-                    # [E-Step] 记录正样本 (用于修正 Key)
-                    if current_query and current_query not in memory_stats[doc_id]['pos_queries']:
+                
+                # 🔥🔥🔥 [差分更新真值表] 🔥🔥🔥
+                
+                # Case 1: 雪中送炭 (Critical Success) [Base错 -> RAG对]
+                # 这是最宝贵的记忆，大幅奖励
+                if is_rag_correct and not is_base_correct:
+                    memory_stats[doc_id]['alpha'] += 2.0  # 建议给 2.0 或更高，加速收敛
+                    if current_query not in memory_stats[doc_id]['pos_queries']:
                         memory_stats[doc_id]['pos_queries'].append(current_query)
-                else:
-                    # ❌ 答错：Beta + 1
-                    memory_stats[doc_id]['beta'] += 1.0
-                    # [TextGrad] 记录负样本 (用于修正 Content) -> 这就是梯度！
-                    if current_query and current_query not in memory_stats[doc_id]['neg_queries']:
+                
+                # Case 2: 帮倒忙 (Toxic Failure) [Base对 -> RAG错]
+                # 这是最有害的记忆，大幅惩罚
+                elif not is_rag_correct and is_base_correct:
+                    memory_stats[doc_id]['beta'] += 2.0   # 严厉惩罚
+                    if current_query not in memory_stats[doc_id]['neg_queries']:
+                        memory_stats[doc_id]['neg_queries'].append(current_query)
+                
+                # Case 3: 锦上添花 (Redundant) [Base对 -> RAG对]
+                # 说明这题很简单，记忆可能有用也可能没用。
+                # 给予微小奖励或不奖励，防止“万金油”记忆刷分
+                elif is_rag_correct and is_base_correct:
+                    memory_stats[doc_id]['alpha'] += 0.05  # 微小奖励，维持活跃度
+                
+                # Case 4: 无能为力 (Useless) [Base错 -> RAG错]
+                # 记忆没起作用，但也没把本来对的搞错。
+                # 给予中等惩罚，因为它占用了检索位但没解决问题
+                elif not is_rag_correct and not is_base_correct:
+                    memory_stats[doc_id]['beta'] += 0.25
+                    # 也可以加入负样本队列，供 Expert 分析“为什么没帮上忙”
+                    if current_query not in memory_stats[doc_id]['neg_queries']:
                         memory_stats[doc_id]['neg_queries'].append(current_query)
 
-    # 3. 计算用于可视化的标量分数 (Mean Utility)
-    # 注意：memory_stats 才是我们要存盘的核心数据，final_scores_map 只是给 print/vis 用的
+    # 5. 计算最终标量分数
     final_scores_map = {}
     for mid, stats in memory_stats.items():
-        # 这里计算简单的均值用于热度展示: alpha / (alpha + beta)
-        # 你也可以调用 _calculate_bemr_final_score 算 UCB 分数
         total = stats['alpha'] + stats['beta']
+        # 计算 Beta 分布期望值
         score = stats['alpha'] / total if total > 0 else 0.5
         final_scores_map[mid] = score
     
-    # 返回三个值：可视化分数表，完整的统计状态，正确数
     return final_scores_map, memory_stats, correct_count
 
 def _print_stats_and_save(memory_scores, id_to_content, total_questions, correct_count, freq_file ,is_write = True):

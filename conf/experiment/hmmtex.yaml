@@ -6,8 +6,8 @@ mode: "rag" # 建议设为 'rag' 或 'all' 才能看到优化效果，设为 'ba
 
 # 1. 记忆库配置 (Corpus)
 # 保持不变，还是用 MATH 作为知识底座
-corpus_dataset_name: "DigitalLearningGmbH/MATH-lighteval"
-corpus_dataset_config: "algebra"
+corpus_dataset_name: "qwedsacf/competition_math" #"HuggingFaceH4/MATH-500"
+corpus_dataset_config: null
 corpus_split: "train"
 
 # 2. 测试集配置 (Test)

@@ -8,6 +8,7 @@ from tools.prepare.merge_hmmt import merge_hmmt
 from tools.prepare.merge_aime import merge_aime
 from tools.prepare.sci_split import prepare_sciknow
 from tools.prepare.humaneval_split import prepare_humaneval
+from tools.prepare.mbpp_split import prepare_mbpp
 
 def _get_available_column(dataset, candidates, default):
     """辅助函数：在数据集里自动寻找存在的列名"""
@@ -37,6 +38,9 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str, need_split):
     if cfg.experiment.tag == "humaneval":
         # 直接调用分离出去的模块
         return prepare_humaneval(corpus_file, test_file, cfg, need_split)
+    if cfg.experiment.tag == "mbpp":
+        # 直接调用分离出去的模块
+        return prepare_mbpp(corpus_file, test_file, cfg, need_split)
     if (cfg.experiment.tag != "math_self") and (cfg.experiment.tag != "gsm8k_self"):
         is_val = need_split
         need_split = False
@@ -72,6 +76,35 @@ def prepare_data(cfg: DictConfig, corpus_file: str, test_file: str, need_split):
         except Exception as e:
             print(f"❌ 数据集下载失败: {e}")
             return False
+
+        # -------------------------------------------------------
+        # 🔥 [核心修改] HMMT 专属逻辑: 强制过滤 Level 5
+        # -------------------------------------------------------
+        target_level = cfg.experiment.get("level_filter", None) # 默认从 yaml 读
+        
+        if cfg.experiment.tag == "hmmtex" or cfg.experiment.tag == "aimeex":
+            print(f"🚀 [Mode] HMMT 模式已激活: 强制过滤 MATH Level 5 数据作为记忆")
+            target_level = "Level 5" # 强制指定
+            
+            # 确保我们取的是 solution (推理过程)
+            # 如果 yaml 里没配对，这里强制修正查找列表的优先级
+            if "solution" in ds_corpus.column_names:
+                a_candidates.insert(0, "solution") 
+
+        # 执行难度过滤
+        if target_level:
+            level_candidates = ["level", "difficulty", "grade"]
+            level_col = _get_available_column(ds_corpus, level_candidates, None)
+
+            if level_col:
+                original_len = len(ds_corpus)
+                # 过滤逻辑: 只要包含 '5' 或者是 'Level 5'
+                ds_corpus = ds_corpus.filter(
+                    lambda x: x[level_col] is not None and ("5" in str(x[level_col]))
+                )
+                print(f"🔥 [Filter] 难度提纯 ({target_level}): {original_len} -> {len(ds_corpus)} 条")
+            else:
+                print(f"⚠️ [Warning] 未找到难度列，无法执行 Level 5 过滤！")
 
         # ==================== [新增代码 START] ====================
         # 根据 yaml 中的 problem_type (例如 "Algebra") 进行过滤

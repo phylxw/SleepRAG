@@ -13,6 +13,7 @@ class BEMRRetrieverWrapper:
         self.retriever = original_retriever
         self.memory_stats = memory_stats
         self.cfg = cfg
+        self.INIT_VAL = cfg.parameters.INIT_VAL
         
         # 🔥 [修正1] 强制截断阈值 (Small-K)
         # 优先读 parameters.final_topk (3)，读不到就用默认值 3
@@ -27,7 +28,7 @@ class BEMRRetrieverWrapper:
         print(f"🛡️ [Wrapper] BEMR 拦截器就绪 | 最终截断: Top-{self.final_topk}")
 
     def _calculate_ucb_score(self, doc_id, sim_score):
-        stats = self.memory_stats.get(str(doc_id), {'alpha': 1.0, 'beta': 1.0})
+        stats = self.memory_stats.get(str(doc_id), {'alpha': self.INIT_VAL , 'beta': self.INIT_VAL})
         alpha = stats['alpha']
         beta = stats['beta']
         total = alpha + beta
@@ -100,7 +101,7 @@ class BEMRRetrieverWrapper:
                 scored_hits.append(hit)
                 
                 # 获取状态用于展示
-                stats = self.memory_stats.get(str(doc_id), {'alpha': 1.0, 'beta': 1.0})
+                stats = self.memory_stats.get(str(doc_id), {'alpha': self.INIT_VAL, 'beta': self.INIT_VAL})
                 
                 # 存入 Debug 列表
                 debug_info.append({

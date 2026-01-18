@@ -41,6 +41,9 @@ def evaluate_results(results, experiment_name, result_log_file):
     correct = 0
     total = len(results)
     
+    # 🔥 [修改 1] 初始化一个列表，用来存每道题的得分 (1.0 或 0.0)
+    scores_list = [] 
+    
     # 确保目录存在 
     os.makedirs(os.path.dirname(result_log_file), exist_ok=True)
 
@@ -50,40 +53,38 @@ def evaluate_results(results, experiment_name, result_log_file):
         f.write(header)
         
         for i, item in enumerate(results):
-            # 获取题目用于展示 [cite: 18]
+            # 获取题目用于展示
             question = item.question if hasattr(item, 'question') else item.get('question', "")
             pred_raw = item.pred if hasattr(item, 'pred') else item.get('pred', "")
 
             # 核心判断逻辑
             is_right, gold_val, pred_val = judge_math_item(item)
+            
+            # 🔥 [修改 2] 记录当前这道题的分数
+            current_score = 1.0 if is_right else 0.0
+            scores_list.append(current_score)
+            
             if is_right: 
                 correct += 1
 
-            # 日志记录：记录解析前后的对比 [cite: 19, 20]
+            # 日志记录：记录解析前后的对比
             log_entry = (
                 f"\n[ID]: {i}\n"
-                f"[Question]: {str(question)}...\n"
+                f"[Question]: {str(question)[:50]}...{str(question)[-50:]}\n" # 稍微截断一下防止log太长
                 f"[Gold Parsed]: {gold_val}\n"
                 f"[Pred Parsed]: {pred_val}\n"
-                f"[Pred All]: {pred_raw}\n"
+                f"[Pred All]: {pred_raw[:50]}...{pred_raw[-50:]}\n"
                 f"[Result]: {'✅ Correct' if is_right else '❌ Wrong'}\n"
                 f"{'-'*30}\n"
             )
-            log_print = (
-                f"\n[ID]: {i}\n"
-                f"[Question]: {str(question)}...\n"
-                f"[Gold Parsed]: {gold_val}\n"
-                f"[Pred Parsed]: {pred_val}\n"
-                f"[Result]: {'✅ Correct' if is_right else '❌ Wrong'}\n"
-                f"{'-'*30}\n"
-            )
+            
             f.write(log_entry)
             
-            # 控制台只打印前 5 条预览 [cite: 20]
-            if i < 5: 
-                print(log_print.strip())
+            # 控制台只打印前 5 条预览
+            if i < 3: 
+                print(log_entry.strip())
 
-        # 统计最终准确率 [cite: 21]
+        # 统计最终准确率
         acc = correct / total * 100 if total > 0 else 0
         summary = (
             f"\n📊 统计 ({experiment_name}):\n"
@@ -93,4 +94,5 @@ def evaluate_results(results, experiment_name, result_log_file):
         print(summary)
         f.write(summary)
         
-    return acc
+    # 🔥 [修改 3] 返回元组：(总准确率, 每道题的得分列表)
+    return acc, scores_list

@@ -22,10 +22,10 @@ field_map:
   question: "question"
   answer: "answer"
 
-total_limit: 2000
+total_limit: 4000
 # 可选值通常为: "Biology", "Chemistry", "Physics", "Material Science"
 # 如果想跑混合模式，就设为 null
-target_domain: "Chemistry"
+target_domain: "Physics"
 # RAG 参数 (BEMR 必须)
 retrieval_method: "bm25"
 

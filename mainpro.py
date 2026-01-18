@@ -8,49 +8,60 @@ from omegaconf import DictConfig
 from utils.logger import setup_logging,Logger
 import logging
 import shutil
-
+from hydra import compose, initialize
+from omegaconf import OmegaConf
+from hydra.core.global_hydra import GlobalHydra
 # 🤫 把 httpx 和 httpcore 的日志级别调高到 WARNING
 # 这样只有出错才会打印，正常的 200 OK 就不显示了
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-
-def run_step(script_name, step_desc, overrides, env=None):
+#更换不同的模数据集来跑
+exp_override = None #["experiment=mbpp"]
+sglang_url = None #"http://127.0.0.1:30001/v1" 
+expert_url = None #"http://127.0.0.1:30001/v1"
+expert_source= None #"qwen"
+def run_step(script_name, step_desc, overrides, env=None, hydra_overrides=None):
     print(f"\n{'='*80}")
     print(f"🚀 [Step: {step_desc}] 启动 {script_name}...")
-    
+
     cmd = [sys.executable, script_name]
-    
+
+    # ✅ 先加 “Hydra 组切换/运行参数” 类 overrides（比如 experiment=hmmtex）
+    if hydra_overrides:
+        print("🧩 Hydra Overrides:")
+        for o in hydra_overrides:
+            cmd.append(o)          # 注意：这里不要加 ++
+            print(f"   - {o}")
+
     print(f"📝 参数覆盖 (Overrides):")
     for key, value in overrides.items():
         final_value = value
         if isinstance(value, str) and (os.path.exists(os.path.dirname(value)) or os.path.isabs(value)):
-             final_value = os.path.abspath(value)
-        
-        # 使用 ++ 强制覆盖/添加
-        cmd.append(f"++{key}={final_value}") 
+            final_value = os.path.abspath(value)
+
+        # 使用 ++ 强制覆盖/添加普通字段
+        cmd.append(f"++{key}={final_value}")
         print(f"   - {key} = {final_value}")
-        
+
     print(f"{'-'*80}")
 
     current_env = os.environ.copy()
     if env:
         current_env.update(env)
-    
-    # 强制让子进程的输出不缓冲，实时打到我们的 Logger 里
+
     current_env["PYTHONUNBUFFERED"] = "1"
 
     start_time = time.time()
     try:
-        # 注意：这里不能用 capture_output=True，否则 Logger 抓不到子进程的实时输出
-        # 我们直接让子进程继承 stdout，这样它的输出就会流向我们的 Logger
         subprocess.run(cmd, env=current_env, check=True)
     except subprocess.CalledProcessError:
         print(f"\n❌ [Error] {script_name} 运行失败！流水线已终止。")
         sys.exit(1)
-    
+
     elapsed = time.time() - start_time
     print(f"✅ [Success] {script_name} 完成 (耗时: {elapsed:.2f}s)")
+
 
 def get_round_paths(root_dir, pipeline_id, round_idx, tag="sci"):
     """
@@ -88,6 +99,20 @@ def get_round_paths(root_dir, pipeline_id, round_idx, tag="sci"):
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig):
+
+
+
+# # 假设你已经在 main.py 中初始化了配置路径
+#     with initialize(config_path="conf"):
+#         cfg = compose(config_name="config")
+#         # 直接通过代码覆盖配置中的参数，而不修改 config.yaml
+#         cfg.expert_model.source = "sglang"  # 直接在代码里修改参数
+#         cfg.experiment.tag = "my_experiment"  # 修改tag等参数
+
+    GlobalHydra.instance().clear()
+    with initialize(version_base=None, config_path="conf"):
+        cfg = compose(config_name="config", overrides=exp_override)
+
     # 0. 读取配置
     EXP_TAG = cfg.experiment.get("tag", "experiment")
     TOTAL_ROUNDS = cfg.parameters.get("total_rounds", 2)
@@ -204,7 +229,13 @@ def main(cfg: DictConfig):
                 "paths.test_file": curr_paths['test'],
                 "paths.result_dir": curr_paths['dir'], 
             }
-            
+
+            if sglang_url:
+                pre_overrides["model.sglang_api_url"] = sglang_url
+            if expert_url:
+                pre_overrides["expert_model.sglang_api_url"] = expert_url
+            if expert_source:
+                pre_overrides["expert_model.source"] = expert_source            
             # 2. 根据模式决定是否“魔改”读取路径
             if skip_prepro:
                 # === 🔄 Resume 模式 ===
@@ -221,8 +252,14 @@ def main(cfg: DictConfig):
                     "parameters.is_first": False,
                     "paths.result_dir": curr_paths['dir'], 
                 }
-                
-                # run_step("evallast.py", f"R{r}-0. 接力起点(Resume)效果测试", overrides=eval_overrides, env=client_env)
+
+                if sglang_url:
+                    eval_overrides["model.sglang_api_url"] = sglang_url
+                if expert_url:
+                    pre_overrides["expert_model.sglang_api_url"] = expert_url
+                if expert_source:
+                    pre_overrides["expert_model.source"] = expert_source                   
+                # run_step("evallast.py", f"R{r}-0. 接力起点(Resume)效果测试", overrides=eval_overrides, env=client_env,hydra_overrides=exp_override)
                 
             else:
                 # === 🌱 Fresh 模式 ===
@@ -231,8 +268,8 @@ def main(cfg: DictConfig):
                 # 或者在代码里有兜底逻辑（如果找不到 opt 就测 raw）。
                 # 这样就避免了指向一个还不存在的文件。
                 
-                run_step("evallast.py", f"R{r}-0. 初始Baseline测试", overrides=pre_overrides, env=client_env)
-                run_step("prepro.py", f"R{r}-1. 初始数据准备", pre_overrides, env=client_env)
+                run_step("evallast.py", f"R{r}-0. 初始Baseline测试", overrides=pre_overrides, env=client_env,hydra_overrides=exp_override)
+                run_step("preultra.py", f"R{r}-1. 初始数据准备", pre_overrides, env=client_env,hydra_overrides=exp_override)
 
         # --------------------------------------------------
         # Step 2: Clustering
@@ -246,7 +283,13 @@ def main(cfg: DictConfig):
             "paths.stats_file": input_stats,
             "paths.freq_file": input_freq
         }
-        run_step("clusterultra.py", f"R{r}-2. 聚类", cluster_overrides, env=client_env)
+        if sglang_url:
+            cluster_overrides["model.sglang_api_url"] = sglang_url   
+        if expert_url:
+            pre_overrides["expert_model.sglang_api_url"] = expert_url   
+        if expert_source:
+            pre_overrides["expert_model.source"] = expert_source                 
+        run_step("clusterultra.py", f"R{r}-2. 聚类", cluster_overrides, env=client_env,hydra_overrides=exp_override)
 
         # --------------------------------------------------
         # Step 3: Optimizer
@@ -260,8 +303,14 @@ def main(cfg: DictConfig):
             "paths.optimized_memory": curr_paths['optimized_memory'],
             "paths.stats_optimized_file": curr_paths['stats_optimized'], 
         }
-        # run_step("optimizerXtreme.py", f"R{r}-3. 记忆优化", opt_overrides, env=client_env)
-        run_step("optimizerZ.py", f"R{r}-3. 记忆优化", opt_overrides, env=client_env)
+        if sglang_url:
+            opt_overrides["model.sglang_api_url"] = sglang_url
+        if expert_url:
+            pre_overrides["expert_model.sglang_api_url"] = expert_url
+        if expert_source:
+            pre_overrides["expert_model.source"] = expert_source               
+        # run_step("optimizerXtreme.py", f"R{r}-3. 记忆优化", opt_overrides, env=client_env,hydra_overrides=exp_override)
+        run_step("optimizerZ.py", f"R{r}-3. 记忆优化", opt_overrides, env=client_env,hydra_overrides=exp_override)
         # --------------------------------------------------
         # Step 4: Eval
         # --------------------------------------------------
@@ -274,16 +323,21 @@ def main(cfg: DictConfig):
             "parameters.is_first": False,
             "paths.result_dir": curr_paths['dir'], 
         }
-
+        if sglang_url:
+            eval_overrides["model.sglang_api_url"] = sglang_url
+        if expert_url:
+            pre_overrides["expert_model.sglang_api_url"] = expert_url
+        if expert_source:
+            pre_overrides["expert_model.source"] = expert_source               
         # 兜底检查 Stats
         if not os.path.exists(curr_paths['stats_optimized']):
             print(f"⚠️ 警告：Optimizer 未生成 Stats，沿用输入 Stats。")
             shutil.copy(input_stats, curr_paths['stats_optimized'])
 
-        run_step("evalpro.py", f"R{r}-4. 效果评测 & 更新After状态", eval_overrides, env=client_env)
+        run_step("evalpro.py", f"R{r}-4. 效果评测 & 更新After状态", eval_overrides, env=client_env,hydra_overrides=exp_override)
         
         # 每轮最后跑一次测试集
-        run_step("evallast.py", f"R{r}-5. 测试集验证", eval_overrides, env=client_env)
+        run_step("evallast.py", f"R{r}-5. 测试集验证", eval_overrides, env=client_env,hydra_overrides=exp_override)
 
         print(f"\n✅ 第 {r} 轮执行完毕！")
 

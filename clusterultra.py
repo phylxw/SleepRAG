@@ -605,7 +605,10 @@ Examples:
 Task: Provide a **very short category name** (3-6 words) for this problem type.
 Output ONLY the category name. Do not explain.
 """
-    return call_llm(prompt, cfg).replace('"', "").strip()
+    callback = call_llm(prompt, cfg)
+    print('我的输出是这样的')
+    print(callback)
+    return callback.replace('"', "").strip()
 
 
 # =============== Main (Hydra Integrated) ===============

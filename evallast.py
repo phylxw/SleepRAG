@@ -31,10 +31,10 @@ from tools.retrieverwrapper import BEMRRetrieverWrapper
 # 2. 核心功能函数 (Hydra 适配)
 # ==========================================
 from tools.memoryscore import _load_memory_corpus,_calculate_scores,_print_stats_and_save,_visualize_results
-from tools.prepare.humaneval_split import prepare_humaneval
+from tools.evalcode import evaluate_code_results
 
 def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_image_file: str, 
-                         old_stats: dict = None, root_dir: str = None, corpus_tag: str = None):
+                         old_stats: dict = None, baseline_scores = None, root_dir: str = None, corpus_tag: str = None):
     """
     记忆热度/效用统计与导出 - 主入口
     [新增参数]:
@@ -50,7 +50,7 @@ def analyze_memory_usage(rag_results, cfg: DictConfig, corpus_file: str, vis_ima
 
     # 2. 计算分数 (传入 old_stats)
     # 注意：这里接收了 new_stats (完整的字典)
-    memory_scores, new_stats, correct_count = _calculate_scores(rag_results, all_memory_ids, cfg, old_stats)
+    memory_scores, _, correct_count = _calculate_scores(rag_results, all_memory_ids, cfg, old_stats, baseline_scores)
 
     # 3. 打印统计并保存简易分数文件 (兼容旧逻辑)
     # memory_scores 是标量分数，可以直接传给旧函数
@@ -240,6 +240,16 @@ def evallast(cfg: DictConfig):
         print(f"❌ 未支持的 MODEL_SOURCE: {model_source}")
         return
 
+    is_code_task = False
+    code_dataset_type = "math" # 默认
+    if "humaneval" in cfg.experiment.tag.lower():
+        is_code_task = True
+        code_dataset_type = "humaneval"
+    elif "mbpp" in cfg.experiment.tag.lower():
+        is_code_task = True
+        code_dataset_type = "mbpp"
+
+
     stats_optimized_file = cfg.paths.stats_optimized_file
     memory_stats = {}
     if os.path.exists(stats_optimized_file):
@@ -270,14 +280,33 @@ def evallast(cfg: DictConfig):
 
         baseline_preds = generator.generate(baseline_inputs)
         
-        baseline_results = []
-        for item, pred in zip(test_dataset_raw, baseline_preds):
-            baseline_results.append({
-                "question": item['question'],
-                "golden_answers": item['golden_answers'],
-                "pred": pred
-            })
-        acc_baseline = evaluate_results(baseline_results, "Baseline (No RAG)", result_log_file)
+
+        if is_code_task:
+            baseline_results = []
+            for item, pred in zip(test_dataset_raw, baseline_preds):
+                # 🔥 [修改 1] 必须保留原始 item 的所有字段！
+                # 否则 CodeEvaluator 找不到 test_list 或 prompt
+                res_item = item.copy() 
+                res_item['pred'] = pred
+                baseline_results.append(res_item)
+        # 🔥 调用新的代码评测函数
+        # 注意：这里直接传入 results 对象列表，函数内部会处理批量评测
+            acc_baseline,_ = evaluate_code_results(
+                results=baseline_results, # 这里传入 baseline_results 或 rag_results
+                experiment_name=f"Baseline (No RAG)",
+                result_log_file=result_log_file,
+                dataset_type=code_dataset_type
+            )
+        else:
+            baseline_results = []
+            for item, pred in zip(test_dataset_raw, baseline_preds):
+                baseline_results.append({
+                    "question": item['question'],
+                    "golden_answers": item['golden_answers'],
+                    "pred": pred
+                })
+            # 🧊 调用原有的数学评测函数
+            acc_baseline,_ = evaluate_results(baseline_results, "Baseline (No RAG)", result_log_file)
 
     # --- Task B: FlashRAG ---
     if cfg.parameters.mode in ['rag', 'all']:
@@ -302,22 +331,51 @@ def evallast(cfg: DictConfig):
         # 重新实例化 Config 以确保 Retriever 能读到正确参数
         rag_config = Config(config_dict=rag_update)
         retriever = get_retriever(rag_config)
-        # 🔥 [关键] 评估时也必须启用 Wrapper，利用 BEMR 分数辅助检索
-        # 即使记忆被优化了，UCB 策略依然能帮助我们平衡探索
-        print("🔧 [BEMR] 启用贝叶斯 UCB 探索策略 (Evaluating)...")
+        print("🔧 [BEMR] 启用贝叶斯 UCB 探索策略...")
         retriever = BEMRRetrieverWrapper(retriever, memory_stats, cfg)
+
         rag_system_part = cfg.experiment.prompts.rag_system
         
         prompt_tpl = PromptTemplate(rag_config, system_prompt=rag_system_part, user_prompt="")
+
         pipeline = SequentialPipeline(rag_config, prompt_template=prompt_tpl, retriever=retriever, generator=generator)
         dataset_obj = Dataset(rag_config, test_file)
         
         rag_results = pipeline.run(dataset_obj)
         
-        acc_rag = evaluate_results(rag_results, f"FlashRAG ({corpus_name} Optimized Memory)", result_log_file)
+        if is_code_task:
+            print("🔄 [Data Merge] 正在将 RAG 预测结果与原始元数据合并...")
+            # 🔥 [核心修复] FlashRAG 结果对象丢失了 prompt/test 字段，必须从原始数据回填
+            # 前提：FlashRAG 输出顺序与输入顺序一致 (SequentialPipeline 保证这点)
+            rag_eval_data = []
+            for raw_item, rag_item in zip(test_dataset_raw, rag_results):
+                # 复制原始数据的所有字段 (prompt, test, entry_point...)
+                merged_item = raw_item.copy()
+                # 注入 RAG 的预测结果
+                merged_item['pred'] = rag_item.pred 
+                rag_eval_data.append(merged_item)
+
+            # 2. 🔥 运行代码评测，并获取 scores 列表
+            acc_rag, scores_list = evaluate_code_results(
+                results=rag_eval_data, 
+                experiment_name=f"FlashRAG ({corpus_tag}) - Code",
+                result_log_file=result_log_file,
+                dataset_type=code_dataset_type
+            )
+            
+            # 3. 🔥🔥 [核心修复] 将分数注入回 rag_results 对象中！
+            # 只有做了这一步，后面的 analyze_memory_usage 才能读到 item.score
+            print(f"💉 [Inject] 正在将 {len(scores_list)} 个评测分数注入 RAG 结果对象...")
+            for i, item in enumerate(rag_results):
+                # 动态赋值，供 memoryscore.py 使用
+                item.score = scores_list[i]
+        else:
+            # 🧊 调用原有的数学评测函数
+            acc_rag,_ = evaluate_results(rag_results, f"SleepRAG ({corpus_tag} Optimized Memory)", result_log_file)
+        
         
         # 统计记忆热度 (传入 cfg)
-        analyze_memory_usage(rag_results, cfg, corpus_file, vis_image_file, old_stats=memory_stats,root_dir=root_dir,corpus_tag=corpus_tag)
+        analyze_memory_usage(rag_results, cfg, corpus_file, vis_image_file, old_stats=memory_stats,baseline_scores = None,root_dir=root_dir,corpus_tag=corpus_tag)
 
     # --- Summary ---
     if cfg.parameters.mode != 'baseline':

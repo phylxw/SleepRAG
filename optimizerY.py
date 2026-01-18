@@ -13,7 +13,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 from tools.optimize.callllm import init_llm, call_llm_batch
 from tools.optimize.callexpert import init_expert_llm, call_expert, call_expert_batch
 from tools.optimize.memoryload import load_clustered_memories, load_cluster_summary
-from optimize.selectold import select_ids_from_stats
+from optimizeold.selectold import select_ids_from_stats
 from optimize.prune import prune
 # 一定要引用我们刚刚改好的新版 textgrad_opt
 from optimize.textgrad_opt import textgrad_opt 

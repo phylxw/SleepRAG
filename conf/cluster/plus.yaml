@@ -1,5 +1,5 @@
 # 核心聚类方法
-method: "kmeans_auto"                # 选项: hdbscan, kmeans, kmeans_auto, agglomerative
+method: "agglomerative"                # 选项: hdbscan, kmeans, kmeans_auto, agglomerative
 
 # HDBSCAN 参数 (用于发现噪声和任意形状的簇)
 hdbscan_min_cluster_size: 5      # 最小簇大小
@@ -20,12 +20,12 @@ umap_metric: "cosine"            # UMAP 内部度量
 # PCA 预处理参数 (解决你的报错)
 enable_pca_preprocess: true      # 是否在聚类/UMAP前先做一次 PCA
 pca_preprocess_dims: 50          # PCA 降维后的维度 (保留主要特征)
-vis_pca_dims: 50                 # 可视化前的 PCA 维度 (通常与上面一致)
+vis_pca_dims: 50               # 可视化前的 PCA 维度 (通常与上面一致)
 
 # 兼容旧代码的参数 (防止代码里有残留引用报错)
 kmeans_n_clusters: 5             # 如果回退到 kmeans 需要此参数
 kmeans_k_min: 2
-kmeans_k_max: 50
+kmeans_k_max: 100
 tsne_perplexity: 30
 distance_threshold: 0.5
 
